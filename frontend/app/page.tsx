@@ -7,6 +7,7 @@ import Card from '@/components/Card';
 import { WaypointList } from '@/components/WaypointEditor';
 import RouteImport, { SampleRTZButton } from '@/components/RouteImport';
 import VoyageResults, { VoyageProfile } from '@/components/VoyageResults';
+import SavedRoutes from '@/components/SavedRoutes';
 import {
   Navigation,
   Ship,
@@ -98,6 +99,14 @@ export default function HomePage() {
     setRouteName(name);
     setVoyageResult(null);
     setViewMode('edit');
+  };
+
+  // Handle loading saved route
+  const handleLoadRoute = (loadedWaypoints: Position[]) => {
+    setWaypoints(loadedWaypoints);
+    setVoyageResult(null);
+    setViewMode('edit');
+    setIsEditing(true);
   };
 
   // Clear route
@@ -215,6 +224,14 @@ export default function HomePage() {
                   Click on the map to add waypoints
                 </p>
               )}
+
+              {/* Saved Routes */}
+              <div className="mt-4 pt-4 border-t border-white/10">
+                <SavedRoutes
+                  currentWaypoints={waypoints}
+                  onLoadRoute={handleLoadRoute}
+                />
+              </div>
             </Card>
 
             {/* Voyage Parameters Card */}
