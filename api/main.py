@@ -25,13 +25,13 @@ import uvicorn
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.grib.extractor import GRIBExtractor
 from src.optimization.vessel_model import VesselModel, VesselSpecs
 from src.optimization.voyage import VoyageCalculator, LegWeather
 from src.routes.rtz_parser import (
     Route, Waypoint, parse_rtz_string, create_route_from_waypoints,
     haversine_distance, calculate_bearing
 )
+from src.data.copernicus import CopernicusDataProvider, SyntheticDataProvider, WeatherData
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -182,125 +182,161 @@ class VesselConfig(BaseModel):
 # Global State
 # ============================================================================
 
-grib_extractor = GRIBExtractor(cache_dir="data/grib_cache")
 current_vessel_specs = VesselSpecs()
 current_vessel_model = VesselModel(specs=current_vessel_specs)
 voyage_calculator = VoyageCalculator(vessel_model=current_vessel_model)
 
-# Cache for parsed GRIB data
-_weather_cache: Dict[str, any] = {}
+# Initialize data providers
+# Copernicus provider (attempts real API if configured)
+copernicus_provider = CopernicusDataProvider(cache_dir="data/copernicus_cache")
+
+# Synthetic fallback provider (always works)
+synthetic_provider = SyntheticDataProvider()
+
+# Cached weather data
+_weather_cache: Dict[str, WeatherData] = {}
+_cache_expiry: Dict[str, datetime] = {}
+CACHE_TTL_MINUTES = 60
 
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
 
-def generate_sample_wind_field(
+def _get_cache_key(data_type: str, lat_min: float, lat_max: float, lon_min: float, lon_max: float) -> str:
+    """Generate cache key for weather data."""
+    return f"{data_type}_{lat_min:.1f}_{lat_max:.1f}_{lon_min:.1f}_{lon_max:.1f}"
+
+
+def _is_cache_valid(key: str) -> bool:
+    """Check if cached data is still valid."""
+    if key not in _cache_expiry:
+        return False
+    return datetime.utcnow() < _cache_expiry[key]
+
+
+def get_wind_field(
     lat_min: float, lat_max: float,
     lon_min: float, lon_max: float,
     resolution: float = 1.0,
     time: datetime = None
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> WeatherData:
     """
-    Generate sample wind field for development/demo.
+    Get wind field from Copernicus or synthetic fallback.
 
-    In production, this would be replaced with actual GRIB data.
-    Creates realistic-looking wind patterns.
+    Tries Copernicus CDS first, falls back to synthetic data.
     """
-    lats = np.arange(lat_min, lat_max + resolution, resolution)
-    lons = np.arange(lon_min, lon_max + resolution, resolution)
+    if time is None:
+        time = datetime.utcnow()
 
-    lon_grid, lat_grid = np.meshgrid(lons, lats)
+    cache_key = _get_cache_key("wind", lat_min, lat_max, lon_min, lon_max)
 
-    # Create realistic wind patterns
-    # Base westerlies in mid-latitudes
-    base_u = 5.0 + 3.0 * np.sin(np.radians(lat_grid * 2))
-    base_v = 2.0 * np.cos(np.radians(lon_grid * 3 + lat_grid * 2))
+    # Check cache
+    if cache_key in _weather_cache and _is_cache_valid(cache_key):
+        logger.debug(f"Using cached wind data for {cache_key}")
+        return _weather_cache[cache_key]
 
-    # Add some variability based on time
-    if time:
-        hour_factor = np.sin(time.hour * np.pi / 12)
-    else:
-        hour_factor = 0.5
+    # Try Copernicus first
+    wind_data = copernicus_provider.fetch_wind_data(lat_min, lat_max, lon_min, lon_max, time)
 
-    # Add weather system pattern (moving low pressure)
-    center_lat = 45.0 + 5.0 * hour_factor
-    center_lon = 0.0 + 10.0 * hour_factor
+    if wind_data is None:
+        logger.info("Copernicus wind data unavailable, using synthetic data")
+        wind_data = synthetic_provider.generate_wind_field(
+            lat_min, lat_max, lon_min, lon_max, resolution, time
+        )
 
-    dist = np.sqrt((lat_grid - center_lat)**2 + (lon_grid - center_lon)**2)
-    system_strength = 8.0 * np.exp(-dist / 10.0)
+    # Cache the result
+    _weather_cache[cache_key] = wind_data
+    _cache_expiry[cache_key] = datetime.utcnow() + timedelta(minutes=CACHE_TTL_MINUTES)
 
-    # Cyclonic rotation (Northern Hemisphere)
-    angle_to_center = np.arctan2(lat_grid - center_lat, lon_grid - center_lon)
-    u_cyclonic = -system_strength * np.sin(angle_to_center + np.pi/2)
-    v_cyclonic = system_strength * np.cos(angle_to_center + np.pi/2)
-
-    u_wind = base_u + u_cyclonic + np.random.randn(*lat_grid.shape) * 0.5
-    v_wind = base_v + v_cyclonic + np.random.randn(*lat_grid.shape) * 0.5
-
-    return lats, lons, u_wind, v_wind
+    return wind_data
 
 
-def generate_sample_wave_field(
+def get_wave_field(
     lat_min: float, lat_max: float,
     lon_min: float, lon_max: float,
     resolution: float = 1.0,
-    u_wind: np.ndarray = None,
-    v_wind: np.ndarray = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    wind_data: WeatherData = None,
+) -> WeatherData:
     """
-    Generate sample wave field based on wind.
+    Get wave field from Copernicus or synthetic fallback.
 
-    Wave height correlates with wind speed.
+    Tries CMEMS first, falls back to synthetic data based on wind.
     """
-    lats = np.arange(lat_min, lat_max + resolution, resolution)
-    lons = np.arange(lon_min, lon_max + resolution, resolution)
+    cache_key = _get_cache_key("wave", lat_min, lat_max, lon_min, lon_max)
 
-    lon_grid, lat_grid = np.meshgrid(lons, lats)
+    # Check cache
+    if cache_key in _weather_cache and _is_cache_valid(cache_key):
+        logger.debug(f"Using cached wave data for {cache_key}")
+        return _weather_cache[cache_key]
 
-    if u_wind is not None and v_wind is not None:
-        wind_speed = np.sqrt(u_wind**2 + v_wind**2)
-        # Wave height roughly 0.15 * wind_speed for fully developed seas
-        wave_height = 0.15 * wind_speed + np.random.randn(*wind_speed.shape) * 0.3
-        wave_height = np.maximum(wave_height, 0.5)  # Minimum swell
-    else:
-        # Default wave pattern
-        wave_height = 1.5 + 1.0 * np.sin(np.radians(lat_grid * 3)) + np.random.randn(*lat_grid.shape) * 0.2
-        wave_height = np.maximum(wave_height, 0.3)
+    # Try Copernicus first
+    wave_data = copernicus_provider.fetch_wave_data(lat_min, lat_max, lon_min, lon_max)
 
-    return lats, lons, wave_height
+    if wave_data is None:
+        logger.info("Copernicus wave data unavailable, using synthetic data")
+        wave_data = synthetic_provider.generate_wave_field(
+            lat_min, lat_max, lon_min, lon_max, resolution, wind_data
+        )
+
+    # Cache the result
+    _weather_cache[cache_key] = wave_data
+    _cache_expiry[cache_key] = datetime.utcnow() + timedelta(minutes=CACHE_TTL_MINUTES)
+
+    return wave_data
+
+
+def get_current_field(
+    lat_min: float, lat_max: float,
+    lon_min: float, lon_max: float,
+) -> Optional[WeatherData]:
+    """
+    Get ocean current field from CMEMS.
+
+    Returns None if unavailable (currents are optional).
+    """
+    cache_key = _get_cache_key("current", lat_min, lat_max, lon_min, lon_max)
+
+    if cache_key in _weather_cache and _is_cache_valid(cache_key):
+        return _weather_cache[cache_key]
+
+    current_data = copernicus_provider.fetch_current_data(lat_min, lat_max, lon_min, lon_max)
+
+    if current_data is not None:
+        _weather_cache[cache_key] = current_data
+        _cache_expiry[cache_key] = datetime.utcnow() + timedelta(minutes=CACHE_TTL_MINUTES)
+
+    return current_data
 
 
 def get_weather_at_point(lat: float, lon: float, time: datetime) -> Dict:
     """
     Get weather at a specific point.
 
-    Uses sample data for demo. In production, would query GRIB cache.
+    Uses cached grid data for interpolation.
     """
-    # Generate localized sample
-    lats, lons, u, v = generate_sample_wind_field(
-        lat - 1, lat + 1, lon - 1, lon + 1, 0.5, time
+    # Define region around the point
+    margin = 2.0
+    lat_min, lat_max = lat - margin, lat + margin
+    lon_min, lon_max = lon - margin, lon + margin
+
+    # Get grid data
+    wind_data = get_wind_field(lat_min, lat_max, lon_min, lon_max, 0.5, time)
+    wave_data = get_wave_field(lat_min, lat_max, lon_min, lon_max, 0.5, wind_data)
+    current_data = get_current_field(lat_min, lat_max, lon_min, lon_max)
+
+    # Interpolate at point
+    point_wx = copernicus_provider.get_weather_at_point(
+        lat, lon, time, wind_data, wave_data, current_data
     )
 
-    # Find nearest grid point
-    lat_idx = np.argmin(np.abs(lats - lat))
-    lon_idx = np.argmin(np.abs(lons - lon))
-
-    u_val = u[lat_idx, lon_idx]
-    v_val = v[lat_idx, lon_idx]
-
-    wind_speed = np.sqrt(u_val**2 + v_val**2)
-    wind_dir = (np.degrees(np.arctan2(-u_val, -v_val)) + 360) % 360
-
-    # Wave height from wind
-    wave_height = max(0.5, 0.15 * wind_speed + np.random.randn() * 0.3)
-    wave_dir = (wind_dir + 15) % 360  # Waves typically offset from wind
-
     return {
-        'wind_speed_ms': float(wind_speed),
-        'wind_dir_deg': float(wind_dir),
-        'sig_wave_height_m': float(wave_height),
-        'wave_dir_deg': float(wave_dir),
+        'wind_speed_ms': point_wx.wind_speed_ms,
+        'wind_dir_deg': point_wx.wind_dir_deg,
+        'sig_wave_height_m': point_wx.wave_height_m,
+        'wave_dir_deg': point_wx.wave_dir_deg,
+        'current_speed_ms': point_wx.current_speed_ms,
+        'current_dir_deg': point_wx.current_dir_deg,
     }
 
 
@@ -342,12 +378,49 @@ async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 
+@app.get("/api/data-sources")
+async def get_data_sources():
+    """
+    Get status of available data sources.
+
+    Shows which Copernicus APIs are configured and available.
+    """
+    return {
+        "copernicus": {
+            "cds": {
+                "available": copernicus_provider._has_cdsapi,
+                "description": "Climate Data Store (ERA5 wind data)",
+                "setup": "pip install cdsapi && create ~/.cdsapirc with API key",
+            },
+            "cmems": {
+                "available": copernicus_provider._has_copernicusmarine,
+                "description": "Copernicus Marine Service (waves, currents)",
+                "setup": "pip install copernicusmarine && configure credentials",
+            },
+            "xarray": {
+                "available": copernicus_provider._has_xarray,
+                "description": "NetCDF data handling",
+                "setup": "pip install xarray netcdf4",
+            },
+        },
+        "fallback": {
+            "synthetic": {
+                "available": True,
+                "description": "Synthetic data generator (always available)",
+            }
+        },
+        "active_source": "copernicus" if (
+            copernicus_provider._has_cdsapi and copernicus_provider._has_copernicusmarine
+        ) else "synthetic",
+    }
+
+
 # ============================================================================
 # API Endpoints - Weather (Layer 1)
 # ============================================================================
 
 @app.get("/api/weather/wind")
-async def get_wind_field(
+async def api_get_wind_field(
     lat_min: float = Query(30.0, ge=-90, le=90),
     lat_max: float = Query(60.0, ge=-90, le=90),
     lon_min: float = Query(-15.0, ge=-180, le=180),
@@ -359,13 +432,12 @@ async def get_wind_field(
     Get wind field data for visualization.
 
     Returns U/V wind components on a grid.
+    Uses Copernicus CDS when available, falls back to synthetic data.
     """
     if time is None:
         time = datetime.utcnow()
 
-    lats, lons, u_wind, v_wind = generate_sample_wind_field(
-        lat_min, lat_max, lon_min, lon_max, resolution, time
-    )
+    wind_data = get_wind_field(lat_min, lat_max, lon_min, lon_max, resolution, time)
 
     return {
         "parameter": "wind",
@@ -377,17 +449,18 @@ async def get_wind_field(
             "lon_max": lon_max,
         },
         "resolution": resolution,
-        "nx": len(lons),
-        "ny": len(lats),
-        "lats": lats.tolist(),
-        "lons": lons.tolist(),
-        "u": u_wind.tolist(),
-        "v": v_wind.tolist(),
+        "nx": len(wind_data.lons),
+        "ny": len(wind_data.lats),
+        "lats": wind_data.lats.tolist(),
+        "lons": wind_data.lons.tolist(),
+        "u": wind_data.u_component.tolist() if wind_data.u_component is not None else [],
+        "v": wind_data.v_component.tolist() if wind_data.v_component is not None else [],
+        "source": "copernicus" if copernicus_provider._has_cdsapi else "synthetic",
     }
 
 
 @app.get("/api/weather/wind/velocity")
-async def get_wind_velocity_format(
+async def api_get_wind_velocity_format(
     lat_min: float = Query(30.0),
     lat_max: float = Query(60.0),
     lon_min: float = Query(-15.0),
@@ -399,13 +472,12 @@ async def get_wind_velocity_format(
     Get wind data in leaflet-velocity compatible format.
 
     Returns array of [U-component, V-component] data with headers.
+    Uses Copernicus CDS when available.
     """
     if time is None:
         time = datetime.utcnow()
 
-    lats, lons, u_wind, v_wind = generate_sample_wind_field(
-        lat_min, lat_max, lon_min, lon_max, resolution, time
-    )
+    wind_data = get_wind_field(lat_min, lat_max, lon_min, lon_max, resolution, time)
 
     # leaflet-velocity format
     header = {
@@ -417,14 +489,14 @@ async def get_wind_velocity_format(
         "la2": lat_min,
         "dx": resolution,
         "dy": resolution,
-        "nx": len(lons),
-        "ny": len(lats),
+        "nx": len(wind_data.lons),
+        "ny": len(wind_data.lats),
         "refTime": time.isoformat(),
     }
 
     # Flatten data (row-major, from top-left)
-    u_flat = u_wind[::-1].flatten().tolist()  # Flip lat axis
-    v_flat = v_wind[::-1].flatten().tolist()
+    u_flat = wind_data.u_component[::-1].flatten().tolist()  # Flip lat axis
+    v_flat = wind_data.v_component[::-1].flatten().tolist()
 
     return [
         {"header": {**header, "parameterNumber": 2}, "data": u_flat},
@@ -433,7 +505,7 @@ async def get_wind_velocity_format(
 
 
 @app.get("/api/weather/waves")
-async def get_wave_field(
+async def api_get_wave_field(
     lat_min: float = Query(30.0),
     lat_max: float = Query(60.0),
     lon_min: float = Query(-15.0),
@@ -443,19 +515,17 @@ async def get_wave_field(
 ):
     """
     Get wave height field for visualization.
+
+    Uses Copernicus CMEMS when available, falls back to synthetic data.
     """
     if time is None:
         time = datetime.utcnow()
 
-    # Get wind first
-    _, _, u_wind, v_wind = generate_sample_wind_field(
-        lat_min, lat_max, lon_min, lon_max, resolution, time
-    )
+    # Get wind first for synthetic fallback
+    wind_data = get_wind_field(lat_min, lat_max, lon_min, lon_max, resolution, time)
 
-    # Generate waves based on wind
-    lats, lons, wave_height = generate_sample_wave_field(
-        lat_min, lat_max, lon_min, lon_max, resolution, u_wind, v_wind
-    )
+    # Get waves (CMEMS or synthetic)
+    wave_data = get_wave_field(lat_min, lat_max, lon_min, lon_max, resolution, wind_data)
 
     return {
         "parameter": "wave_height",
@@ -467,12 +537,13 @@ async def get_wave_field(
             "lon_max": lon_max,
         },
         "resolution": resolution,
-        "nx": len(lons),
-        "ny": len(lats),
-        "lats": lats.tolist(),
-        "lons": lons.tolist(),
-        "data": wave_height.tolist(),
+        "nx": len(wave_data.lons),
+        "ny": len(wave_data.lats),
+        "lats": wave_data.lats.tolist(),
+        "lons": wave_data.lons.tolist(),
+        "data": wave_data.values.tolist(),
         "unit": "m",
+        "source": "copernicus" if copernicus_provider._has_copernicusmarine else "synthetic",
         "colorscale": {
             "min": 0,
             "max": 6,
@@ -481,14 +552,64 @@ async def get_wave_field(
     }
 
 
+@app.get("/api/weather/currents")
+async def api_get_current_field(
+    lat_min: float = Query(30.0),
+    lat_max: float = Query(60.0),
+    lon_min: float = Query(-15.0),
+    lon_max: float = Query(40.0),
+    resolution: float = Query(1.0),
+    time: Optional[datetime] = None,
+):
+    """
+    Get ocean current field for visualization.
+
+    Uses Copernicus CMEMS when available. Returns empty if unavailable.
+    """
+    if time is None:
+        time = datetime.utcnow()
+
+    current_data = get_current_field(lat_min, lat_max, lon_min, lon_max)
+
+    if current_data is None:
+        return {
+            "parameter": "current",
+            "time": time.isoformat(),
+            "available": False,
+            "message": "Current data requires CMEMS credentials",
+        }
+
+    return {
+        "parameter": "current",
+        "time": time.isoformat(),
+        "available": True,
+        "bbox": {
+            "lat_min": lat_min,
+            "lat_max": lat_max,
+            "lon_min": lon_min,
+            "lon_max": lon_max,
+        },
+        "resolution": resolution,
+        "nx": len(current_data.lons),
+        "ny": len(current_data.lats),
+        "lats": current_data.lats.tolist(),
+        "lons": current_data.lons.tolist(),
+        "u": current_data.u_component.tolist() if current_data.u_component is not None else [],
+        "v": current_data.v_component.tolist() if current_data.v_component is not None else [],
+        "unit": "m/s",
+    }
+
+
 @app.get("/api/weather/point")
-async def get_weather_point(
+async def api_get_weather_point(
     lat: float = Query(..., ge=-90, le=90),
     lon: float = Query(..., ge=-180, le=180),
     time: Optional[datetime] = None,
 ):
     """
     Get weather at a specific point.
+
+    Returns wind, waves, and currents (if available).
     """
     if time is None:
         time = datetime.utcnow()
@@ -506,6 +627,11 @@ async def get_weather_point(
         "waves": {
             "height_m": wx['sig_wave_height_m'],
             "dir_deg": wx['wave_dir_deg'],
+        },
+        "current": {
+            "speed_ms": wx['current_speed_ms'],
+            "speed_kts": wx['current_speed_ms'] * 1.94384,
+            "dir_deg": wx['current_dir_deg'],
         }
     }
 
