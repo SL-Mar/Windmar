@@ -292,6 +292,68 @@ export interface ZoneListItem {
   is_builtin: boolean;
 }
 
+// Calibration types
+export interface CalibrationFactors {
+  calm_water: number;
+  wind: number;
+  waves: number;
+  sfoc_factor: number;
+  calibrated_at?: string;
+  num_reports_used: number;
+  calibration_error: number;
+  days_since_drydock: number;
+}
+
+export interface CalibrationStatus {
+  calibrated: boolean;
+  factors: {
+    calm_water: number;
+    wind: number;
+    waves: number;
+    sfoc_factor: number;
+  };
+  calibrated_at?: string;
+  num_reports_used?: number;
+  calibration_error_mt?: number;
+  days_since_drydock?: number;
+  message?: string;
+}
+
+export interface NoonReportData {
+  timestamp: string;
+  latitude: number;
+  longitude: number;
+  speed_over_ground_kts: number;
+  speed_through_water_kts?: number;
+  fuel_consumption_mt: number;
+  period_hours: number;
+  is_laden: boolean;
+  heading_deg: number;
+  wind_speed_kts?: number;
+  wind_direction_deg?: number;
+  wave_height_m?: number;
+  wave_direction_deg?: number;
+  engine_power_kw?: number;
+}
+
+export interface CalibrationResult {
+  factors: CalibrationFactors;
+  reports_used: number;
+  reports_skipped: number;
+  mean_error_before_mt: number;
+  mean_error_after_mt: number;
+  improvement_pct: number;
+  residuals: Array<{
+    timestamp: string;
+    actual_mt: number;
+    predicted_mt: number;
+    error_mt: number;
+    error_pct: number;
+    speed_kts: number;
+    is_laden: boolean;
+  }>;
+}
+
 // ============================================================================
 // API Functions
 // ============================================================================
@@ -431,6 +493,74 @@ export const apiClient = {
 
   async updateVesselSpecs(specs: VesselSpecs): Promise<{ status: string; message: string }> {
     const response = await api.post('/api/vessel/specs', specs);
+    return response.data;
+  },
+
+  // -------------------------------------------------------------------------
+  // Calibration API
+  // -------------------------------------------------------------------------
+
+  async getCalibration(): Promise<CalibrationStatus> {
+    const response = await api.get<CalibrationStatus>('/api/vessel/calibration');
+    return response.data;
+  },
+
+  async setCalibration(factors: Partial<CalibrationFactors>): Promise<{ status: string; message: string }> {
+    const response = await api.post('/api/vessel/calibration/set', factors);
+    return response.data;
+  },
+
+  async getNoonReports(): Promise<{
+    count: number;
+    reports: Array<{
+      timestamp: string;
+      latitude: number;
+      longitude: number;
+      speed_kts: number;
+      fuel_mt: number;
+      period_hours: number;
+      is_laden: boolean;
+    }>;
+  }> {
+    const response = await api.get('/api/vessel/noon-reports');
+    return response.data;
+  },
+
+  async addNoonReport(report: NoonReportData): Promise<{ status: string; total_reports: number }> {
+    const response = await api.post('/api/vessel/noon-reports', report);
+    return response.data;
+  },
+
+  async uploadNoonReportsCSV(file: File): Promise<{ status: string; imported: number; total_reports: number }> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await api.post('/api/vessel/noon-reports/upload-csv', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  },
+
+  async clearNoonReports(): Promise<{ status: string; message: string }> {
+    const response = await api.delete('/api/vessel/noon-reports');
+    return response.data;
+  },
+
+  async calibrateVessel(daysSinceDrydock: number = 0): Promise<CalibrationResult> {
+    const response = await api.post<CalibrationResult>(`/api/vessel/calibrate?days_since_drydock=${daysSinceDrydock}`);
+    return response.data;
+  },
+
+  async estimateFouling(daysSinceDrydock: number, operatingRegions: string[] = []): Promise<{
+    days_since_drydock: number;
+    operating_regions: string[];
+    estimated_fouling_factor: number;
+    resistance_increase_pct: number;
+    note: string;
+  }> {
+    const params = new URLSearchParams();
+    params.append('days_since_drydock', String(daysSinceDrydock));
+    operatingRegions.forEach(r => params.append('operating_regions', r));
+    const response = await api.post(`/api/vessel/calibration/estimate-fouling?${params.toString()}`);
     return response.data;
   },
 

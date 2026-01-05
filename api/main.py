@@ -28,6 +28,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.optimization.vessel_model import VesselModel, VesselSpecs
 from src.optimization.voyage import VoyageCalculator, LegWeather
 from src.optimization.route_optimizer import RouteOptimizer, OptimizedRoute
+from src.optimization.vessel_calibration import (
+    VesselCalibrator, NoonReport, CalibrationFactors, create_calibrated_model
+)
 from src.routes.rtz_parser import (
     Route, Waypoint, parse_rtz_string, create_route_from_waypoints,
     haversine_distance, calculate_bearing
@@ -266,6 +269,47 @@ class VesselConfig(BaseModel):
     service_speed_ballast: float = 15.0
 
 
+class NoonReportModel(BaseModel):
+    """Noon report data for calibration."""
+    timestamp: datetime
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+    speed_over_ground_kts: float = Field(..., gt=0)
+    speed_through_water_kts: Optional[float] = None
+    fuel_consumption_mt: float = Field(..., gt=0)
+    period_hours: float = Field(24.0, gt=0)
+    is_laden: bool = True
+    heading_deg: float = Field(0.0, ge=0, le=360)
+    wind_speed_kts: Optional[float] = None
+    wind_direction_deg: Optional[float] = None
+    wave_height_m: Optional[float] = None
+    wave_direction_deg: Optional[float] = None
+    engine_power_kw: Optional[float] = None
+
+
+class CalibrationFactorsModel(BaseModel):
+    """Calibration factors for vessel model."""
+    calm_water: float = Field(1.0, description="Hull fouling factor")
+    wind: float = Field(1.0, description="Wind coefficient adjustment")
+    waves: float = Field(1.0, description="Wave response adjustment")
+    sfoc_factor: float = Field(1.0, description="SFOC multiplier")
+    calibrated_at: Optional[datetime] = None
+    num_reports_used: int = 0
+    calibration_error: float = 0.0
+    days_since_drydock: int = 0
+
+
+class CalibrationResponse(BaseModel):
+    """Calibration result response."""
+    factors: CalibrationFactorsModel
+    reports_used: int
+    reports_skipped: int
+    mean_error_before_mt: float
+    mean_error_after_mt: float
+    improvement_pct: float
+    residuals: List[Dict]
+
+
 # ============================================================================
 # Global State
 # ============================================================================
@@ -274,6 +318,10 @@ current_vessel_specs = VesselSpecs()
 current_vessel_model = VesselModel(specs=current_vessel_specs)
 voyage_calculator = VoyageCalculator(vessel_model=current_vessel_model)
 route_optimizer = RouteOptimizer(vessel_model=current_vessel_model)
+
+# Vessel calibration state
+vessel_calibrator = VesselCalibrator(vessel_specs=current_vessel_specs)
+current_calibration: Optional[CalibrationFactors] = None
 
 # Initialize data providers
 # Copernicus provider (attempts real API if configured)
@@ -1175,6 +1223,270 @@ async def update_vessel_specs(config: VesselConfig):
     except Exception as e:
         logger.error(f"Failed to update vessel specs: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# API Endpoints - Vessel Calibration
+# ============================================================================
+
+@app.get("/api/vessel/calibration")
+async def get_calibration():
+    """Get current vessel calibration factors."""
+    global current_calibration
+
+    if current_calibration is None:
+        return {
+            "calibrated": False,
+            "factors": {
+                "calm_water": 1.0,
+                "wind": 1.0,
+                "waves": 1.0,
+                "sfoc_factor": 1.0,
+            },
+            "message": "No calibration data. Using default theoretical model."
+        }
+
+    return {
+        "calibrated": True,
+        "factors": {
+            "calm_water": current_calibration.calm_water,
+            "wind": current_calibration.wind,
+            "waves": current_calibration.waves,
+            "sfoc_factor": current_calibration.sfoc_factor,
+        },
+        "calibrated_at": current_calibration.calibrated_at.isoformat() if current_calibration.calibrated_at else None,
+        "num_reports_used": current_calibration.num_reports_used,
+        "calibration_error_mt": current_calibration.calibration_error,
+        "days_since_drydock": current_calibration.days_since_drydock,
+    }
+
+
+@app.post("/api/vessel/calibration/set")
+async def set_calibration_factors(factors: CalibrationFactorsModel):
+    """Manually set calibration factors."""
+    global current_calibration, current_vessel_model, voyage_calculator, route_optimizer
+
+    current_calibration = CalibrationFactors(
+        calm_water=factors.calm_water,
+        wind=factors.wind,
+        waves=factors.waves,
+        sfoc_factor=factors.sfoc_factor,
+        calibrated_at=datetime.utcnow(),
+        num_reports_used=0,
+        days_since_drydock=factors.days_since_drydock,
+    )
+
+    # Update vessel model with new calibration
+    current_vessel_model = VesselModel(
+        specs=current_vessel_specs,
+        calibration_factors={
+            'calm_water': current_calibration.calm_water,
+            'wind': current_calibration.wind,
+            'waves': current_calibration.waves,
+        }
+    )
+    voyage_calculator = VoyageCalculator(vessel_model=current_vessel_model)
+    route_optimizer = RouteOptimizer(vessel_model=current_vessel_model)
+
+    return {"status": "success", "message": "Calibration factors updated"}
+
+
+@app.get("/api/vessel/noon-reports")
+async def get_noon_reports():
+    """Get list of uploaded noon reports."""
+    global vessel_calibrator
+
+    return {
+        "count": len(vessel_calibrator.noon_reports),
+        "reports": [
+            {
+                "timestamp": r.timestamp.isoformat(),
+                "latitude": r.latitude,
+                "longitude": r.longitude,
+                "speed_kts": r.speed_over_ground_kts,
+                "fuel_mt": r.fuel_consumption_mt,
+                "period_hours": r.period_hours,
+                "is_laden": r.is_laden,
+            }
+            for r in vessel_calibrator.noon_reports
+        ]
+    }
+
+
+@app.post("/api/vessel/noon-reports")
+async def add_noon_report(report: NoonReportModel):
+    """Add a single noon report for calibration."""
+    global vessel_calibrator
+
+    nr = NoonReport(
+        timestamp=report.timestamp,
+        latitude=report.latitude,
+        longitude=report.longitude,
+        speed_over_ground_kts=report.speed_over_ground_kts,
+        speed_through_water_kts=report.speed_through_water_kts,
+        fuel_consumption_mt=report.fuel_consumption_mt,
+        period_hours=report.period_hours,
+        is_laden=report.is_laden,
+        heading_deg=report.heading_deg,
+        wind_speed_kts=report.wind_speed_kts,
+        wind_direction_deg=report.wind_direction_deg,
+        wave_height_m=report.wave_height_m,
+        wave_direction_deg=report.wave_direction_deg,
+        engine_power_kw=report.engine_power_kw,
+    )
+
+    vessel_calibrator.add_noon_report(nr)
+
+    return {
+        "status": "success",
+        "total_reports": len(vessel_calibrator.noon_reports),
+    }
+
+
+@app.post("/api/vessel/noon-reports/upload-csv")
+async def upload_noon_reports_csv(file: UploadFile = File(...)):
+    """
+    Upload noon reports from CSV file.
+
+    Expected columns:
+    - timestamp (ISO format or common date format)
+    - latitude, longitude
+    - speed_over_ground_kts
+    - fuel_consumption_mt
+    - period_hours (optional, default 24)
+    - is_laden (optional, default true)
+    - wind_speed_kts, wind_direction_deg (optional)
+    - wave_height_m, wave_direction_deg (optional)
+    - heading_deg (optional)
+    """
+    global vessel_calibrator
+
+    try:
+        # Save to temp file
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='wb', suffix='.csv', delete=False) as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+
+        # Import from CSV
+        count = vessel_calibrator.add_noon_reports_from_csv(tmp_path)
+
+        # Cleanup
+        tmp_path.unlink()
+
+        return {
+            "status": "success",
+            "imported": count,
+            "total_reports": len(vessel_calibrator.noon_reports),
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to import CSV: {e}", exc_info=True)
+        raise HTTPException(status_code=400, detail=f"Failed to parse CSV: {str(e)}")
+
+
+@app.delete("/api/vessel/noon-reports")
+async def clear_noon_reports():
+    """Clear all uploaded noon reports."""
+    global vessel_calibrator
+
+    vessel_calibrator.noon_reports = []
+    return {"status": "success", "message": "All noon reports cleared"}
+
+
+@app.post("/api/vessel/calibrate", response_model=CalibrationResponse)
+async def calibrate_vessel(
+    days_since_drydock: int = Query(0, ge=0, description="Days since last dry dock"),
+):
+    """
+    Run calibration using uploaded noon reports.
+
+    Finds optimal calibration factors that minimize prediction error
+    compared to actual fuel consumption.
+    """
+    global vessel_calibrator, current_calibration
+    global current_vessel_model, voyage_calculator, route_optimizer
+
+    if len(vessel_calibrator.noon_reports) < VesselCalibrator.MIN_REPORTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Need at least {VesselCalibrator.MIN_REPORTS} noon reports for calibration. "
+                   f"Currently have {len(vessel_calibrator.noon_reports)}."
+        )
+
+    try:
+        result = vessel_calibrator.calibrate(days_since_drydock=days_since_drydock)
+
+        # Store calibration
+        current_calibration = result.factors
+
+        # Update vessel model with calibration
+        current_vessel_model = VesselModel(
+            specs=current_vessel_specs,
+            calibration_factors={
+                'calm_water': current_calibration.calm_water,
+                'wind': current_calibration.wind,
+                'waves': current_calibration.waves,
+            }
+        )
+        voyage_calculator = VoyageCalculator(vessel_model=current_vessel_model)
+        route_optimizer = RouteOptimizer(vessel_model=current_vessel_model)
+
+        # Save calibration to file
+        vessel_calibrator.save_calibration("default", current_calibration)
+
+        return CalibrationResponse(
+            factors=CalibrationFactorsModel(
+                calm_water=result.factors.calm_water,
+                wind=result.factors.wind,
+                waves=result.factors.waves,
+                sfoc_factor=result.factors.sfoc_factor,
+                calibrated_at=result.factors.calibrated_at,
+                num_reports_used=result.factors.num_reports_used,
+                calibration_error=result.factors.calibration_error,
+                days_since_drydock=result.factors.days_since_drydock,
+            ),
+            reports_used=result.reports_used,
+            reports_skipped=result.reports_skipped,
+            mean_error_before_mt=result.mean_error_before,
+            mean_error_after_mt=result.mean_error_after,
+            improvement_pct=result.improvement_pct,
+            residuals=result.residuals,
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Calibration failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Calibration failed: {str(e)}")
+
+
+@app.post("/api/vessel/calibration/estimate-fouling")
+async def estimate_hull_fouling(
+    days_since_drydock: int = Query(..., ge=0),
+    operating_regions: List[str] = Query(default=[], description="Operating regions: tropical, warm_temperate, cold, polar"),
+):
+    """
+    Estimate hull fouling factor without calibration data.
+
+    Useful when no noon reports are available but you know
+    the vessel's operating history.
+    """
+    global vessel_calibrator
+
+    fouling = vessel_calibrator.estimate_hull_fouling(
+        days_since_drydock=days_since_drydock,
+        operating_regions=operating_regions,
+    )
+
+    return {
+        "days_since_drydock": days_since_drydock,
+        "operating_regions": operating_regions,
+        "estimated_fouling_factor": round(fouling, 3),
+        "resistance_increase_pct": round((fouling - 1) * 100, 1),
+        "note": "This is an estimate. Calibration with actual noon reports is more accurate.",
+    }
 
 
 # ============================================================================

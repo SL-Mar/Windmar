@@ -8,6 +8,7 @@ import { WaypointList } from '@/components/WaypointEditor';
 import RouteImport, { SampleRTZButton } from '@/components/RouteImport';
 import VoyageResults, { VoyageProfile } from '@/components/VoyageResults';
 import SavedRoutes from '@/components/SavedRoutes';
+import CalibrationPanel from '@/components/CalibrationPanel';
 import {
   Navigation,
   Ship,
@@ -531,6 +532,9 @@ export default function HomePage() {
                 </button>
               </div>
             </Card>
+
+            {/* Vessel Calibration */}
+            <CalibrationPanel />
 
             {/* Regulatory Zones */}
             <Card title="Regulatory Zones" icon={<Shield className="w-5 h-5" />}>
