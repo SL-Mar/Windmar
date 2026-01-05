@@ -23,6 +23,9 @@ import {
   RefreshCw,
   Compass,
   TrendingDown,
+  AlertTriangle,
+  CheckCircle,
+  ShieldAlert,
 } from 'lucide-react';
 import { apiClient, Position, WindFieldData, VoyageResponse, OptimizationResponse } from '@/lib/api';
 
@@ -423,6 +426,52 @@ export default function HomePage() {
                         <span>{optimizationResult.waypoints.length}</span>
                       </div>
                     </div>
+
+                    {/* Safety Assessment */}
+                    {optimizationResult.safety && (
+                      <div className={`mt-2 p-2 rounded ${
+                        optimizationResult.safety.status === 'safe'
+                          ? 'bg-green-500/20 border border-green-500/30'
+                          : optimizationResult.safety.status === 'marginal'
+                          ? 'bg-yellow-500/20 border border-yellow-500/30'
+                          : 'bg-red-500/20 border border-red-500/30'
+                      }`}>
+                        <div className="flex items-center space-x-2 mb-1">
+                          {optimizationResult.safety.status === 'safe' ? (
+                            <CheckCircle className="w-4 h-4 text-green-400" />
+                          ) : optimizationResult.safety.status === 'marginal' ? (
+                            <AlertTriangle className="w-4 h-4 text-yellow-400" />
+                          ) : (
+                            <ShieldAlert className="w-4 h-4 text-red-400" />
+                          )}
+                          <span className={`text-xs font-medium ${
+                            optimizationResult.safety.status === 'safe'
+                              ? 'text-green-400'
+                              : optimizationResult.safety.status === 'marginal'
+                              ? 'text-yellow-400'
+                              : 'text-red-400'
+                          }`}>
+                            {optimizationResult.safety.status === 'safe'
+                              ? 'Safe Passage'
+                              : optimizationResult.safety.status === 'marginal'
+                              ? 'Marginal Conditions'
+                              : 'Dangerous Conditions'}
+                          </span>
+                        </div>
+                        <div className="text-xs text-gray-400 space-y-0.5">
+                          <div>Max Roll: {optimizationResult.safety.max_roll_deg.toFixed(1)}°</div>
+                          <div>Max Pitch: {optimizationResult.safety.max_pitch_deg.toFixed(1)}°</div>
+                        </div>
+                        {optimizationResult.safety.warnings.length > 0 && (
+                          <div className="mt-1 text-xs text-yellow-400">
+                            {optimizationResult.safety.warnings.slice(0, 2).map((w, i) => (
+                              <div key={i} className="truncate">• {w}</div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <button
                       onClick={applyOptimizedRoute}
                       className="mt-2 w-full py-2 text-sm bg-green-600 text-white rounded hover:bg-green-500 transition-colors"

@@ -27,6 +27,7 @@ import numpy as np
 
 from src.optimization.vessel_model import VesselModel, VesselSpecs
 from src.optimization.voyage import LegWeather
+from src.optimization.seakeeping import SafetyConstraints, SafetyStatus, create_default_safety_constraints
 from src.data.land_mask import is_ocean, is_path_clear, get_land_mask_status
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,13 @@ class OptimizedRoute:
     # Per-leg details
     leg_details: List[Dict]
 
+    # Safety assessment
+    safety_status: str  # "safe", "marginal", "dangerous"
+    safety_warnings: List[str]
+    max_roll_deg: float
+    max_pitch_deg: float
+    max_accel_ms2: float
+
     # Metadata
     grid_resolution_deg: float
     cells_explored: int
@@ -103,6 +111,8 @@ class RouteOptimizer:
         vessel_model: Optional[VesselModel] = None,
         resolution_deg: float = DEFAULT_RESOLUTION_DEG,
         optimization_target: str = "fuel",  # "fuel" or "time"
+        safety_constraints: Optional[SafetyConstraints] = None,
+        enforce_safety: bool = True,
     ):
         """
         Initialize route optimizer.
@@ -111,10 +121,19 @@ class RouteOptimizer:
             vessel_model: Vessel performance model
             resolution_deg: Grid resolution in degrees
             optimization_target: What to minimize ("fuel" or "time")
+            safety_constraints: Safety constraint checker (seakeeping model)
+            enforce_safety: Whether to penalize/forbid unsafe routes
         """
         self.vessel_model = vessel_model or VesselModel()
         self.resolution_deg = resolution_deg
         self.optimization_target = optimization_target
+        self.enforce_safety = enforce_safety
+
+        # Safety constraints (seakeeping model)
+        self.safety_constraints = safety_constraints or create_default_safety_constraints(
+            lpp=self.vessel_model.specs.lpp,
+            beam=self.vessel_model.specs.beam,
+        )
 
         # Weather provider function (set before optimization)
         self.weather_provider: Optional[Callable] = None
@@ -182,12 +201,12 @@ class RouteOptimizer:
         waypoints = self._smooth_path(waypoints)
 
         # Calculate route statistics
-        opt_fuel, opt_time, opt_distance, leg_details = self._calculate_route_stats(
+        opt_fuel, opt_time, opt_distance, leg_details, safety_summary = self._calculate_route_stats(
             waypoints, departure_time, calm_speed_kts, is_laden
         )
 
         # Calculate direct route for comparison
-        direct_fuel, direct_time, direct_distance, _ = self._calculate_route_stats(
+        direct_fuel, direct_time, direct_distance, _, _ = self._calculate_route_stats(
             [origin, destination], departure_time, calm_speed_kts, is_laden
         )
 
@@ -207,6 +226,11 @@ class RouteOptimizer:
             fuel_savings_pct=fuel_savings,
             time_savings_pct=time_savings,
             leg_details=leg_details,
+            safety_status=safety_summary['status'],
+            safety_warnings=safety_summary['warnings'],
+            max_roll_deg=safety_summary['max_roll_deg'],
+            max_pitch_deg=safety_summary['max_pitch_deg'],
+            max_accel_ms2=safety_summary['max_accel_ms2'],
             grid_resolution_deg=self.resolution_deg,
             cells_explored=cells_explored,
             optimization_time_ms=optimization_time_ms,
@@ -490,11 +514,26 @@ class RouteOptimizer:
 
         travel_time_hours = distance_nm / sog_kts
 
+        # Apply safety constraints
+        safety_factor = 1.0
+        if self.enforce_safety and weather.sig_wave_height_m > 0:
+            wave_period_s = 5.0 + weather.sig_wave_height_m  # Estimate period from height
+            safety_factor = self.safety_constraints.get_safety_cost_factor(
+                wave_height_m=weather.sig_wave_height_m,
+                wave_period_s=wave_period_s,
+                wave_dir_deg=weather.wave_dir_deg,
+                heading_deg=bearing,
+                speed_kts=calm_speed_kts,
+                is_laden=is_laden,
+            )
+            if safety_factor == float('inf'):
+                return float('inf'), float('inf')  # Dangerous - forbidden
+
         # Return cost based on optimization target
         if self.optimization_target == "time":
-            return travel_time_hours, travel_time_hours
+            return travel_time_hours * safety_factor, travel_time_hours
         else:
-            return result['fuel_mt'], travel_time_hours
+            return result['fuel_mt'] * safety_factor, travel_time_hours
 
     def _calculate_current_effect(
         self,
@@ -599,17 +638,24 @@ class RouteOptimizer:
         departure_time: datetime,
         calm_speed_kts: float,
         is_laden: bool,
-    ) -> Tuple[float, float, float, List[Dict]]:
+    ) -> Tuple[float, float, float, List[Dict], Dict]:
         """
         Calculate total fuel, time, and distance for a route.
 
         Returns:
-            Tuple of (total_fuel_mt, total_time_hours, total_distance_nm, leg_details)
+            Tuple of (total_fuel_mt, total_time_hours, total_distance_nm, leg_details, safety_summary)
         """
         total_fuel = 0.0
         total_time = 0.0
         total_distance = 0.0
         leg_details = []
+
+        # Safety tracking
+        max_roll = 0.0
+        max_pitch = 0.0
+        max_accel = 0.0
+        all_warnings = []
+        worst_safety_status = SafetyStatus.SAFE
 
         current_time = departure_time
 
@@ -655,6 +701,35 @@ class RouteOptimizer:
             total_time += time_hours
             total_distance += distance
 
+            # Safety assessment for this leg
+            leg_safety = None
+            if weather.sig_wave_height_m > 0:
+                wave_period_s = 5.0 + weather.sig_wave_height_m
+                leg_safety = self.safety_constraints.assess_safety(
+                    wave_height_m=weather.sig_wave_height_m,
+                    wave_period_s=wave_period_s,
+                    wave_dir_deg=weather.wave_dir_deg,
+                    heading_deg=bearing,
+                    speed_kts=calm_speed_kts,
+                    is_laden=is_laden,
+                )
+
+                # Track worst values
+                max_roll = max(max_roll, leg_safety.motions.roll_amplitude_deg)
+                max_pitch = max(max_pitch, leg_safety.motions.pitch_amplitude_deg)
+                max_accel = max(max_accel, leg_safety.motions.bridge_accel_ms2)
+
+                # Collect warnings
+                for warning in leg_safety.warnings:
+                    if warning not in all_warnings:
+                        all_warnings.append(warning)
+
+                # Track worst status
+                if leg_safety.status == SafetyStatus.DANGEROUS:
+                    worst_safety_status = SafetyStatus.DANGEROUS
+                elif leg_safety.status == SafetyStatus.MARGINAL and worst_safety_status != SafetyStatus.DANGEROUS:
+                    worst_safety_status = SafetyStatus.MARGINAL
+
             leg_details.append({
                 'from': from_wp,
                 'to': to_wp,
@@ -665,11 +740,22 @@ class RouteOptimizer:
                 'sog_kts': sog,
                 'wind_speed_ms': weather.wind_speed_ms,
                 'wave_height_m': weather.sig_wave_height_m,
+                'safety_status': leg_safety.status.value if leg_safety else 'safe',
+                'roll_deg': leg_safety.motions.roll_amplitude_deg if leg_safety else 0.0,
+                'pitch_deg': leg_safety.motions.pitch_amplitude_deg if leg_safety else 0.0,
             })
 
             current_time += timedelta(hours=time_hours)
 
-        return total_fuel, total_time, total_distance, leg_details
+        safety_summary = {
+            'status': worst_safety_status.value,
+            'warnings': all_warnings,
+            'max_roll_deg': max_roll,
+            'max_pitch_deg': max_pitch,
+            'max_accel_ms2': max_accel,
+        }
+
+        return total_fuel, total_time, total_distance, leg_details, safety_summary
 
     @staticmethod
     def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

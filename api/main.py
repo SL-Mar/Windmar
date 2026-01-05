@@ -115,6 +115,19 @@ class OptimizationLegModel(BaseModel):
     sog_kts: float
     wind_speed_ms: float
     wave_height_m: float
+    # Safety metrics per leg
+    safety_status: Optional[str] = None
+    roll_deg: Optional[float] = None
+    pitch_deg: Optional[float] = None
+
+
+class SafetySummary(BaseModel):
+    """Safety assessment summary for optimized route."""
+    status: str  # "safe", "marginal", "dangerous"
+    warnings: List[str]
+    max_roll_deg: float
+    max_pitch_deg: float
+    max_accel_ms2: float
 
 
 class OptimizationResponse(BaseModel):
@@ -132,6 +145,9 @@ class OptimizationResponse(BaseModel):
 
     # Per-leg details
     legs: List[OptimizationLegModel]
+
+    # Safety assessment
+    safety: Optional[SafetySummary] = None
 
     # Metadata
     optimization_target: str
@@ -1054,7 +1070,19 @@ async def optimize_route(request: OptimizationRequest):
                 sog_kts=round(leg['sog_kts'], 1),
                 wind_speed_ms=round(leg['wind_speed_ms'], 1),
                 wave_height_m=round(leg['wave_height_m'], 1),
+                safety_status=leg.get('safety_status'),
+                roll_deg=round(leg['roll_deg'], 1) if leg.get('roll_deg') else None,
+                pitch_deg=round(leg['pitch_deg'], 1) if leg.get('pitch_deg') else None,
             ))
+
+        # Build safety summary
+        safety_summary = SafetySummary(
+            status=result.safety_status,
+            warnings=result.safety_warnings,
+            max_roll_deg=round(result.max_roll_deg, 1),
+            max_pitch_deg=round(result.max_pitch_deg, 1),
+            max_accel_ms2=round(result.max_accel_ms2, 2),
+        )
 
         return OptimizationResponse(
             waypoints=waypoints,
@@ -1066,6 +1094,7 @@ async def optimize_route(request: OptimizationRequest):
             fuel_savings_pct=round(result.fuel_savings_pct, 1),
             time_savings_pct=round(result.time_savings_pct, 1),
             legs=legs,
+            safety=safety_summary,
             optimization_target=request.optimization_target,
             grid_resolution_deg=request.grid_resolution_deg,
             cells_explored=result.cells_explored,

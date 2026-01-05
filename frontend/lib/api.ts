@@ -196,6 +196,18 @@ export interface OptimizationLeg {
   sog_kts: number;
   wind_speed_ms: number;
   wave_height_m: number;
+  // Safety metrics per leg
+  safety_status?: 'safe' | 'marginal' | 'dangerous';
+  roll_deg?: number;
+  pitch_deg?: number;
+}
+
+export interface SafetySummary {
+  status: 'safe' | 'marginal' | 'dangerous';
+  warnings: string[];
+  max_roll_deg: number;
+  max_pitch_deg: number;
+  max_accel_ms2: number;
 }
 
 export interface OptimizationResponse {
@@ -208,6 +220,8 @@ export interface OptimizationResponse {
   fuel_savings_pct: number;
   time_savings_pct: number;
   legs: OptimizationLeg[];
+  // Safety assessment
+  safety?: SafetySummary;
   optimization_target: string;
   grid_resolution_deg: number;
   cells_explored: number;
