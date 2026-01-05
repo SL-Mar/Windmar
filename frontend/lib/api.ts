@@ -173,6 +173,47 @@ export interface VoyageResponse {
   data_sources?: DataSourceSummary;
 }
 
+// Optimization types
+export interface OptimizationRequest {
+  origin: Position;
+  destination: Position;
+  calm_speed_kts: number;
+  is_laden: boolean;
+  departure_time?: string;
+  optimization_target: 'fuel' | 'time';
+  grid_resolution_deg: number;
+}
+
+export interface OptimizationLeg {
+  from_lat: number;
+  from_lon: number;
+  to_lat: number;
+  to_lon: number;
+  distance_nm: number;
+  bearing_deg: number;
+  fuel_mt: number;
+  time_hours: number;
+  sog_kts: number;
+  wind_speed_ms: number;
+  wave_height_m: number;
+}
+
+export interface OptimizationResponse {
+  waypoints: Position[];
+  total_fuel_mt: number;
+  total_time_hours: number;
+  total_distance_nm: number;
+  direct_fuel_mt: number;
+  direct_time_hours: number;
+  fuel_savings_pct: number;
+  time_savings_pct: number;
+  legs: OptimizationLeg[];
+  optimization_target: string;
+  grid_resolution_deg: number;
+  cells_explored: number;
+  optimization_time_ms: number;
+}
+
 // Vessel types
 export interface VesselSpecs {
   dwt: number;
@@ -292,6 +333,25 @@ export const apiClient = {
     const params: { waypoints: string; time?: string } = { waypoints: wpString };
     if (time) params.time = time;
     const response = await api.get('/api/voyage/weather-along-route', { params });
+    return response.data;
+  },
+
+  // -------------------------------------------------------------------------
+  // Optimization API (Layer 4)
+  // -------------------------------------------------------------------------
+
+  async optimizeRoute(request: OptimizationRequest): Promise<OptimizationResponse> {
+    const response = await api.post<OptimizationResponse>('/api/optimize/route', request);
+    return response.data;
+  },
+
+  async getOptimizationStatus(): Promise<{
+    status: string;
+    default_resolution_deg: number;
+    default_max_cells: number;
+    optimization_targets: string[];
+  }> {
+    const response = await api.get('/api/optimize/status');
     return response.data;
   },
 

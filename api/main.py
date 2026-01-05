@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.optimization.vessel_model import VesselModel, VesselSpecs
 from src.optimization.voyage import VoyageCalculator, LegWeather
+from src.optimization.route_optimizer import RouteOptimizer, OptimizedRoute
 from src.routes.rtz_parser import (
     Route, Waypoint, parse_rtz_string, create_route_from_waypoints,
     haversine_distance, calculate_bearing
@@ -88,6 +89,55 @@ class VoyageRequest(BaseModel):
     is_laden: bool = True
     departure_time: Optional[datetime] = None
     use_weather: bool = True
+
+
+class OptimizationRequest(BaseModel):
+    """Request for route optimization."""
+    origin: Position
+    destination: Position
+    calm_speed_kts: float = Field(..., gt=0, lt=30, description="Calm water speed in knots")
+    is_laden: bool = True
+    departure_time: Optional[datetime] = None
+    optimization_target: str = Field("fuel", description="Minimize 'fuel' or 'time'")
+    grid_resolution_deg: float = Field(0.5, ge=0.1, le=2.0, description="Grid resolution in degrees")
+
+
+class OptimizationLegModel(BaseModel):
+    """Optimized route leg details."""
+    from_lat: float
+    from_lon: float
+    to_lat: float
+    to_lon: float
+    distance_nm: float
+    bearing_deg: float
+    fuel_mt: float
+    time_hours: float
+    sog_kts: float
+    wind_speed_ms: float
+    wave_height_m: float
+
+
+class OptimizationResponse(BaseModel):
+    """Route optimization result."""
+    waypoints: List[Position]
+    total_fuel_mt: float
+    total_time_hours: float
+    total_distance_nm: float
+
+    # Comparison with direct route
+    direct_fuel_mt: float
+    direct_time_hours: float
+    fuel_savings_pct: float
+    time_savings_pct: float
+
+    # Per-leg details
+    legs: List[OptimizationLegModel]
+
+    # Metadata
+    optimization_target: str
+    grid_resolution_deg: float
+    cells_explored: int
+    optimization_time_ms: float
 
 
 class LegResultModel(BaseModel):
@@ -204,6 +254,7 @@ class VesselConfig(BaseModel):
 current_vessel_specs = VesselSpecs()
 current_vessel_model = VesselModel(specs=current_vessel_specs)
 voyage_calculator = VoyageCalculator(vessel_model=current_vessel_model)
+route_optimizer = RouteOptimizer(vessel_model=current_vessel_model)
 
 # Initialize data providers
 # Copernicus provider (attempts real API if configured)
@@ -944,6 +995,103 @@ async def get_weather_along_route(
         })
 
     return {"time": time.isoformat(), "waypoints": result}
+
+
+# ============================================================================
+# API Endpoints - Route Optimization (Layer 4)
+# ============================================================================
+
+@app.post("/api/optimize/route", response_model=OptimizationResponse)
+async def optimize_route(request: OptimizationRequest):
+    """
+    Find optimal route through weather using A* search.
+
+    Minimizes fuel consumption (or time) by routing around adverse weather.
+
+    The algorithm:
+    1. Builds a grid around the origin-destination corridor
+    2. Uses A* search with weather-aware cost function
+    3. Smooths the resulting path to create navigable waypoints
+    4. Returns optimized route with fuel/time savings comparison
+
+    Grid resolution affects accuracy vs computation time:
+    - 0.25° = ~15nm cells, high accuracy, slower
+    - 0.5° = ~30nm cells, good balance (default)
+    - 1.0° = ~60nm cells, fast, less precise
+    """
+    global route_optimizer
+
+    departure = request.departure_time or datetime.utcnow()
+
+    # Configure optimizer
+    route_optimizer.resolution_deg = request.grid_resolution_deg
+    route_optimizer.optimization_target = request.optimization_target
+
+    try:
+        result = route_optimizer.optimize_route(
+            origin=(request.origin.lat, request.origin.lon),
+            destination=(request.destination.lat, request.destination.lon),
+            departure_time=departure,
+            calm_speed_kts=request.calm_speed_kts,
+            is_laden=request.is_laden,
+            weather_provider=weather_provider,
+        )
+
+        # Format response
+        waypoints = [Position(lat=wp[0], lon=wp[1]) for wp in result.waypoints]
+
+        legs = []
+        for leg in result.leg_details:
+            legs.append(OptimizationLegModel(
+                from_lat=leg['from'][0],
+                from_lon=leg['from'][1],
+                to_lat=leg['to'][0],
+                to_lon=leg['to'][1],
+                distance_nm=round(leg['distance_nm'], 2),
+                bearing_deg=round(leg['bearing_deg'], 1),
+                fuel_mt=round(leg['fuel_mt'], 3),
+                time_hours=round(leg['time_hours'], 2),
+                sog_kts=round(leg['sog_kts'], 1),
+                wind_speed_ms=round(leg['wind_speed_ms'], 1),
+                wave_height_m=round(leg['wave_height_m'], 1),
+            ))
+
+        return OptimizationResponse(
+            waypoints=waypoints,
+            total_fuel_mt=round(result.total_fuel_mt, 2),
+            total_time_hours=round(result.total_time_hours, 2),
+            total_distance_nm=round(result.total_distance_nm, 1),
+            direct_fuel_mt=round(result.direct_fuel_mt, 2),
+            direct_time_hours=round(result.direct_time_hours, 2),
+            fuel_savings_pct=round(result.fuel_savings_pct, 1),
+            time_savings_pct=round(result.time_savings_pct, 1),
+            legs=legs,
+            optimization_target=request.optimization_target,
+            grid_resolution_deg=request.grid_resolution_deg,
+            cells_explored=result.cells_explored,
+            optimization_time_ms=round(result.optimization_time_ms, 1),
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Route optimization failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Optimization failed: {str(e)}")
+
+
+@app.get("/api/optimize/status")
+async def get_optimization_status():
+    """Get current optimizer configuration."""
+    return {
+        "status": "ready",
+        "default_resolution_deg": RouteOptimizer.DEFAULT_RESOLUTION_DEG,
+        "default_max_cells": RouteOptimizer.DEFAULT_MAX_CELLS,
+        "optimization_targets": ["fuel", "time"],
+        "vessel_model": {
+            "dwt": current_vessel_specs.dwt,
+            "service_speed_laden": current_vessel_specs.service_speed_laden,
+        }
+    }
 
 
 # ============================================================================
