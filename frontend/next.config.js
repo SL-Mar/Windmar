@@ -2,7 +2,7 @@
 const nextConfig = {
   output: 'standalone',
   reactStrictMode: true,
-  transpilePackages: ['leaflet-draw', 'react-leaflet-draw', 'react-leaflet'],
+  transpilePackages: ['leaflet-draw', 'react-leaflet-draw', 'react-leaflet', 'leaflet-velocity'],
   eslint: {
     ignoreDuringBuilds: true,
   },

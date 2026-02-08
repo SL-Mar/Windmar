@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Response, Depends, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile, File, Query, Response, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -67,9 +67,22 @@ def _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05):
         ]
         return mask_lats.tolist(), mask_lons.tolist(), mask
 from src.data.copernicus import (
-    CopernicusDataProvider, SyntheticDataProvider, WeatherData,
+    CopernicusDataProvider, SyntheticDataProvider, GFSDataProvider, WeatherData,
     ClimatologyProvider, UnifiedWeatherProvider, WeatherDataSource
 )
+
+
+def _apply_ocean_mask_velocity(u: np.ndarray, v: np.ndarray, lats: np.ndarray, lons: np.ndarray) -> tuple:
+    """Zero out U/V components over land so leaflet-velocity skips land areas."""
+    try:
+        from global_land_mask import globe
+        lon_grid, lat_grid = np.meshgrid(lons, lats)
+        ocean = globe.is_ocean(lat_grid, lon_grid)
+        u_masked = np.where(ocean, u, 0.0)
+        v_masked = np.where(ocean, v, 0.0)
+        return u_masked, v_masked
+    except ImportError:
+        return u, v
 from src.data.regulatory_zones import (
     get_zone_checker, Zone, ZoneProperties, ZoneType, ZoneInteraction
 )
@@ -487,6 +500,9 @@ unified_weather_provider = UnifiedWeatherProvider(
 # Synthetic fallback provider (always works)
 synthetic_provider = SyntheticDataProvider()
 
+# GFS near-real-time wind provider (NOAA, updated every 6h)
+gfs_provider = GFSDataProvider(cache_dir="data/gfs_cache")
+
 # Cached weather data
 _weather_cache: Dict[str, WeatherData] = {}
 _cache_expiry: Dict[str, datetime] = {}
@@ -516,9 +532,9 @@ def get_wind_field(
     time: datetime = None
 ) -> WeatherData:
     """
-    Get wind field from Copernicus or synthetic fallback.
+    Get wind field data.
 
-    Tries Copernicus CDS first, falls back to synthetic data.
+    Provider chain: GFS (near-real-time) → ERA5 (reanalysis) → Synthetic.
     """
     if time is None:
         time = datetime.utcnow()
@@ -530,14 +546,21 @@ def get_wind_field(
         logger.debug(f"Using cached wind data for {cache_key}")
         return _weather_cache[cache_key]
 
-    # Try Copernicus first
-    wind_data = copernicus_provider.fetch_wind_data(lat_min, lat_max, lon_min, lon_max, time)
-
-    if wind_data is None:
-        logger.info("Copernicus wind data unavailable, using synthetic data")
-        wind_data = synthetic_provider.generate_wind_field(
-            lat_min, lat_max, lon_min, lon_max, resolution, time
-        )
+    # Try GFS first (near-real-time, ~3.5h lag)
+    wind_data = gfs_provider.fetch_wind_data(lat_min, lat_max, lon_min, lon_max, time)
+    if wind_data is not None:
+        logger.info("Using GFS near-real-time wind data")
+    else:
+        # Fall back to ERA5 (reanalysis, ~5-day lag)
+        wind_data = copernicus_provider.fetch_wind_data(lat_min, lat_max, lon_min, lon_max, time)
+        if wind_data is not None:
+            logger.info("GFS unavailable, using ERA5 reanalysis wind data")
+        else:
+            # Final fallback: synthetic
+            logger.info("GFS and ERA5 unavailable, using synthetic wind data")
+            wind_data = synthetic_provider.generate_wind_field(
+                lat_min, lat_max, lon_min, lon_max, resolution, time
+            )
 
     # Cache the result
     _weather_cache[cache_key] = wind_data
@@ -583,11 +606,12 @@ def get_wave_field(
 def get_current_field(
     lat_min: float, lat_max: float,
     lon_min: float, lon_max: float,
-) -> Optional[WeatherData]:
+    resolution: float = 1.0,
+) -> WeatherData:
     """
-    Get ocean current field from CMEMS.
+    Get ocean current field from CMEMS or synthetic fallback.
 
-    Returns None if unavailable (currents are optional).
+    Always returns data (synthetic fallback guarantees availability).
     """
     cache_key = _get_cache_key("current", lat_min, lat_max, lon_min, lon_max)
 
@@ -596,9 +620,14 @@ def get_current_field(
 
     current_data = copernicus_provider.fetch_current_data(lat_min, lat_max, lon_min, lon_max)
 
-    if current_data is not None:
-        _weather_cache[cache_key] = current_data
-        _cache_expiry[cache_key] = datetime.utcnow() + timedelta(minutes=CACHE_TTL_MINUTES)
+    if current_data is None:
+        logger.info("CMEMS current data unavailable, using synthetic data")
+        current_data = synthetic_provider.generate_current_field(
+            lat_min, lat_max, lon_min, lon_max, resolution
+        )
+
+    _weather_cache[cache_key] = current_data
+    _cache_expiry[cache_key] = datetime.utcnow() + timedelta(minutes=CACHE_TTL_MINUTES)
 
     return current_data
 
@@ -811,12 +840,24 @@ async def get_data_sources():
 
     Shows which Copernicus APIs are configured and available.
     """
+    # Check if pygrib is available for GFS
+    try:
+        import pygrib
+        has_pygrib = True
+    except ImportError:
+        has_pygrib = False
+
     return {
+        "gfs": {
+            "available": has_pygrib,
+            "description": "NOAA GFS 0.25° near-real-time wind (updated every 6h, ~3.5h lag)",
+            "requires": "pygrib + libeccodes (no credentials needed)",
+        },
         "copernicus": {
             "cds": {
                 "available": copernicus_provider._has_cdsapi,
                 "configured": settings.has_cds_credentials,
-                "description": "Climate Data Store (ERA5 wind data)",
+                "description": "Climate Data Store (ERA5 reanalysis wind, ~5-day lag)",
                 "setup": "Set CDSAPI_KEY in .env (register at https://cds.climate.copernicus.eu)",
             },
             "cmems": {
@@ -837,10 +878,11 @@ async def get_data_sources():
                 "description": "Synthetic data generator (always available)",
             }
         },
-        "active_source": "copernicus" if (
-            copernicus_provider._has_cdsapi and copernicus_provider._has_copernicusmarine
-            and (settings.has_cds_credentials or settings.has_cmems_credentials)
-        ) else "synthetic (no credentials configured — set CDSAPI_KEY and COPERNICUSMARINE_SERVICE_* in .env)",
+        "wind_provider_chain": "GFS → ERA5 → Synthetic",
+        "active_wind_source": "gfs" if has_pygrib else (
+            "era5" if (copernicus_provider._has_cdsapi and settings.has_cds_credentials)
+            else "synthetic"
+        ),
     }
 
 
@@ -890,7 +932,11 @@ async def api_get_wind_field(
         "ocean_mask": ocean_mask,
         "ocean_mask_lats": mask_lats,
         "ocean_mask_lons": mask_lons,
-        "source": "copernicus" if copernicus_provider._has_cdsapi else "synthetic",
+        "source": (
+            "gfs" if (wind_data.time and (datetime.utcnow() - wind_data.time).total_seconds() < 43200)
+            else "copernicus" if copernicus_provider._has_cdsapi
+            else "synthetic"
+        ),
     }
 
 
@@ -902,41 +948,245 @@ async def api_get_wind_velocity_format(
     lon_max: float = Query(40.0),
     resolution: float = Query(1.0),
     time: Optional[datetime] = None,
+    forecast_hour: int = Query(0, ge=0, le=120),
 ):
     """
     Get wind data in leaflet-velocity compatible format.
 
     Returns array of [U-component, V-component] data with headers.
-    Uses Copernicus CDS when available.
+    Uses GFS near-real-time data. Pass forecast_hour (0-120, step 3) for forecast frames.
     """
     if time is None:
         time = datetime.utcnow()
 
-    wind_data = get_wind_field(lat_min, lat_max, lon_min, lon_max, resolution, time)
+    if forecast_hour > 0:
+        # Direct GFS fetch for specific forecast hour
+        wind_data = gfs_provider.fetch_wind_data(lat_min, lat_max, lon_min, lon_max, time, forecast_hour)
+        if wind_data is None:
+            raise HTTPException(status_code=404, detail=f"Forecast hour f{forecast_hour:03d} not available")
+    else:
+        wind_data = get_wind_field(lat_min, lat_max, lon_min, lon_max, resolution, time)
 
-    # leaflet-velocity format
+    # Apply ocean mask — zero out land so particles don't render there
+    u_masked, v_masked = _apply_ocean_mask_velocity(
+        wind_data.u_component, wind_data.v_component,
+        wind_data.lats, wind_data.lons,
+    )
+
+    # leaflet-velocity format — derive header from actual data arrays
+    # (data may come at native resolution, e.g. 0.25° from ERA5)
+    actual_lats = wind_data.lats
+    actual_lons = wind_data.lons
+    actual_dx = abs(float(actual_lons[1] - actual_lons[0])) if len(actual_lons) > 1 else resolution
+    actual_dy = abs(float(actual_lats[1] - actual_lats[0])) if len(actual_lats) > 1 else resolution
+
+    # leaflet-velocity expects data ordered N→S (descending lat), W→E (ascending lon)
+    if len(actual_lats) > 1 and actual_lats[1] > actual_lats[0]:
+        # Ascending (S→N from np.arange) — flip to N→S
+        u_ordered = u_masked[::-1]
+        v_ordered = v_masked[::-1]
+        lat_north = float(actual_lats[-1])
+        lat_south = float(actual_lats[0])
+    else:
+        # Already descending (N→S, typical for ERA5 netCDF)
+        u_ordered = u_masked
+        v_ordered = v_masked
+        lat_north = float(actual_lats[0])
+        lat_south = float(actual_lats[-1])
+
     header = {
         "parameterCategory": 2,
         "parameterNumber": 2,
-        "lo1": lon_min,
-        "la1": lat_max,  # Note: lat goes from top to bottom
-        "lo2": lon_max,
-        "la2": lat_min,
-        "dx": resolution,
-        "dy": resolution,
-        "nx": len(wind_data.lons),
-        "ny": len(wind_data.lats),
-        "refTime": time.isoformat(),
+        "lo1": float(actual_lons[0]),
+        "la1": lat_north,
+        "lo2": float(actual_lons[-1]),
+        "la2": lat_south,
+        "dx": actual_dx,
+        "dy": actual_dy,
+        "nx": len(actual_lons),
+        "ny": len(actual_lats),
+        "refTime": (wind_data.time.isoformat() if isinstance(wind_data.time, datetime) else time.isoformat()),
     }
 
-    # Flatten data (row-major, from top-left)
-    u_flat = wind_data.u_component[::-1].flatten().tolist()  # Flip lat axis
-    v_flat = wind_data.v_component[::-1].flatten().tolist()
+    u_flat = u_ordered.flatten().tolist()
+    v_flat = v_ordered.flatten().tolist()
 
     return [
         {"header": {**header, "parameterNumber": 2}, "data": u_flat},
         {"header": {**header, "parameterNumber": 3}, "data": v_flat},
     ]
+
+
+# ============================================================================
+# API Endpoints - GFS Forecast Timeline
+# ============================================================================
+
+# In-progress prefetch tracking
+_prefetch_running = False
+_prefetch_lock = None  # Will be a threading.Lock
+
+
+def _get_prefetch_lock():
+    """Lazy-init thread lock for prefetch."""
+    global _prefetch_lock
+    if _prefetch_lock is None:
+        import threading
+        _prefetch_lock = threading.Lock()
+    return _prefetch_lock
+
+
+@app.get("/api/weather/forecast/status")
+async def api_get_forecast_status(
+    lat_min: float = Query(30.0),
+    lat_max: float = Query(60.0),
+    lon_min: float = Query(-15.0),
+    lon_max: float = Query(40.0),
+):
+    """
+    Get GFS forecast prefetch status.
+
+    Returns current GFS run info and which forecast hours are cached.
+    """
+    run_date, run_hour = gfs_provider._get_latest_run()
+    hours = gfs_provider.get_cached_forecast_hours(lat_min, lat_max, lon_min, lon_max)
+    cached_count = sum(1 for h in hours if h["cached"])
+    total_count = len(hours)
+
+    return {
+        "run_date": run_date,
+        "run_hour": run_hour,
+        "total_hours": total_count,
+        "cached_hours": cached_count,
+        "complete": cached_count == total_count,
+        "prefetch_running": _prefetch_running,
+        "hours": hours,
+    }
+
+
+@app.post("/api/weather/forecast/prefetch")
+async def api_trigger_forecast_prefetch(
+    background_tasks: BackgroundTasks,
+    lat_min: float = Query(30.0),
+    lat_max: float = Query(60.0),
+    lon_min: float = Query(-15.0),
+    lon_max: float = Query(40.0),
+):
+    """
+    Trigger background download of all GFS forecast hours (f000-f120).
+
+    Returns immediately. Poll /api/weather/forecast/status for progress.
+    """
+    global _prefetch_running
+
+    lock = _get_prefetch_lock()
+    if not lock.acquire(blocking=False):
+        return {"status": "already_running", "message": "Prefetch is already in progress"}
+
+    lock.release()
+
+    def _do_prefetch():
+        global _prefetch_running
+        pflock = _get_prefetch_lock()
+        if not pflock.acquire(blocking=False):
+            return
+        try:
+            _prefetch_running = True
+            logger.info("GFS forecast prefetch started")
+            gfs_provider.prefetch_forecast_hours(lat_min, lat_max, lon_min, lon_max)
+            logger.info("GFS forecast prefetch completed")
+        except Exception as e:
+            logger.error(f"GFS forecast prefetch failed: {e}")
+        finally:
+            _prefetch_running = False
+            pflock.release()
+
+    background_tasks.add_task(_do_prefetch)
+
+    return {"status": "started", "message": "Prefetch triggered in background"}
+
+
+@app.get("/api/weather/forecast/frames")
+async def api_get_forecast_frames(
+    lat_min: float = Query(30.0),
+    lat_max: float = Query(60.0),
+    lon_min: float = Query(-15.0),
+    lon_max: float = Query(40.0),
+):
+    """
+    Bulk endpoint returning all cached GFS forecast frames in leaflet-velocity format.
+
+    Returns a single JSON object with frames keyed by forecast hour.
+    Call after prefetch completes for best results.
+    """
+    run_date, run_hour = gfs_provider._get_latest_run()
+    run_time = datetime.strptime(f"{run_date}{run_hour}", "%Y%m%d%H")
+    hours_status = gfs_provider.get_cached_forecast_hours(lat_min, lat_max, lon_min, lon_max)
+
+    frames = {}
+    for h_info in hours_status:
+        if not h_info["cached"]:
+            continue
+
+        fh = h_info["forecast_hour"]
+        wind_data = gfs_provider.fetch_wind_data(lat_min, lat_max, lon_min, lon_max, forecast_hour=fh)
+        if wind_data is None:
+            continue
+
+        # Apply ocean mask
+        u_masked, v_masked = _apply_ocean_mask_velocity(
+            wind_data.u_component, wind_data.v_component,
+            wind_data.lats, wind_data.lons,
+        )
+
+        actual_lats = wind_data.lats
+        actual_lons = wind_data.lons
+        actual_dx = abs(float(actual_lons[1] - actual_lons[0])) if len(actual_lons) > 1 else 0.25
+        actual_dy = abs(float(actual_lats[1] - actual_lats[0])) if len(actual_lats) > 1 else 0.25
+
+        # leaflet-velocity expects N→S ordering
+        if len(actual_lats) > 1 and actual_lats[1] > actual_lats[0]:
+            u_ordered = u_masked[::-1]
+            v_ordered = v_masked[::-1]
+            lat_north = float(actual_lats[-1])
+            lat_south = float(actual_lats[0])
+        else:
+            u_ordered = u_masked
+            v_ordered = v_masked
+            lat_north = float(actual_lats[0])
+            lat_south = float(actual_lats[-1])
+
+        valid_time = run_time + timedelta(hours=fh)
+        header = {
+            "parameterCategory": 2,
+            "parameterNumber": 2,
+            "lo1": float(actual_lons[0]),
+            "la1": lat_north,
+            "lo2": float(actual_lons[-1]),
+            "la2": lat_south,
+            "dx": actual_dx,
+            "dy": actual_dy,
+            "nx": len(actual_lons),
+            "ny": len(actual_lats),
+            "refTime": valid_time.isoformat(),
+            "forecastHour": fh,
+        }
+
+        frames[str(fh)] = [
+            {"header": {**header, "parameterNumber": 2}, "data": u_ordered.flatten().tolist()},
+            {"header": {**header, "parameterNumber": 3}, "data": v_ordered.flatten().tolist()},
+        ]
+
+    cached_count = len(frames)
+    total_count = len(GFSDataProvider.FORECAST_HOURS)
+
+    return {
+        "run_date": run_date,
+        "run_hour": run_hour,
+        "run_time": run_time.isoformat(),
+        "total_hours": total_count,
+        "cached_hours": cached_count,
+        "frames": frames,
+    }
 
 
 @app.get("/api/weather/waves")
@@ -1023,20 +1273,12 @@ async def api_get_current_field(
     """
     Get ocean current field for visualization.
 
-    Uses Copernicus CMEMS when available. Returns empty if unavailable.
+    Uses Copernicus CMEMS when available, falls back to synthetic data.
     """
     if time is None:
         time = datetime.utcnow()
 
-    current_data = get_current_field(lat_min, lat_max, lon_min, lon_max)
-
-    if current_data is None:
-        return {
-            "parameter": "current",
-            "time": time.isoformat(),
-            "available": False,
-            "message": "Current data requires CMEMS credentials",
-        }
+    current_data = get_current_field(lat_min, lat_max, lon_min, lon_max, resolution)
 
     return {
         "parameter": "current",
@@ -1056,7 +1298,74 @@ async def api_get_current_field(
         "u": current_data.u_component.tolist() if current_data.u_component is not None else [],
         "v": current_data.v_component.tolist() if current_data.v_component is not None else [],
         "unit": "m/s",
+        "source": "copernicus" if copernicus_provider._has_copernicusmarine else "synthetic",
     }
+
+
+@app.get("/api/weather/currents/velocity")
+async def api_get_current_velocity_format(
+    lat_min: float = Query(30.0),
+    lat_max: float = Query(60.0),
+    lon_min: float = Query(-15.0),
+    lon_max: float = Query(40.0),
+    resolution: float = Query(1.0),
+    time: Optional[datetime] = None,
+):
+    """
+    Get ocean current data in leaflet-velocity compatible format.
+
+    Returns array of [U-component, V-component] data with headers.
+    """
+    if time is None:
+        time = datetime.utcnow()
+
+    current_data = get_current_field(lat_min, lat_max, lon_min, lon_max, resolution)
+
+    # Apply ocean mask — zero out land so particles don't render there
+    u_masked, v_masked = _apply_ocean_mask_velocity(
+        current_data.u_component, current_data.v_component,
+        current_data.lats, current_data.lons,
+    )
+
+    # Derive header from actual data arrays (native resolution may differ from request)
+    actual_lats = current_data.lats
+    actual_lons = current_data.lons
+    actual_dx = abs(float(actual_lons[1] - actual_lons[0])) if len(actual_lons) > 1 else resolution
+    actual_dy = abs(float(actual_lats[1] - actual_lats[0])) if len(actual_lats) > 1 else resolution
+
+    # leaflet-velocity expects data ordered N→S, W→E
+    if len(actual_lats) > 1 and actual_lats[1] > actual_lats[0]:
+        u_ordered = u_masked[::-1]
+        v_ordered = v_masked[::-1]
+        lat_north = float(actual_lats[-1])
+        lat_south = float(actual_lats[0])
+    else:
+        u_ordered = u_masked
+        v_ordered = v_masked
+        lat_north = float(actual_lats[0])
+        lat_south = float(actual_lats[-1])
+
+    header = {
+        "parameterCategory": 2,
+        "parameterNumber": 2,
+        "lo1": float(actual_lons[0]),
+        "la1": lat_north,
+        "lo2": float(actual_lons[-1]),
+        "la2": lat_south,
+        "dx": actual_dx,
+        "dy": actual_dy,
+        "nx": len(actual_lons),
+        "ny": len(actual_lats),
+        "refTime": time.isoformat(),
+    }
+
+    u_flat = u_ordered.flatten().tolist()
+    v_flat = v_ordered.flatten().tolist()
+
+    return [
+        {"header": {**header, "parameterNumber": 2}, "data": u_flat},
+        {"header": {**header, "parameterNumber": 3}, "data": v_flat},
+    ]
 
 
 @app.get("/api/weather/point")

@@ -39,10 +39,8 @@ env/
 .coverage
 htmlcov/
 
-# Data files
-data/grib_cache/*.grb2
-data/grib_cache/*.grib
-data/grib_cache/*.idx
+# Data files / cache
+/data/
 *.db
 *.sqlite
 

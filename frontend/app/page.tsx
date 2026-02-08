@@ -16,6 +16,7 @@ import {
   Loader2,
   Wind,
   Waves,
+  Droplets,
   Settings,
   Upload,
   MousePointer,
@@ -29,8 +30,9 @@ import {
   ShieldAlert,
   Shield,
   PenTool,
+  Clock,
 } from 'lucide-react';
-import { apiClient, Position, WindFieldData, WaveFieldData, VoyageResponse, OptimizationResponse, CreateZoneRequest } from '@/lib/api';
+import { apiClient, Position, WindFieldData, WaveFieldData, VelocityData, VoyageResponse, OptimizationResponse, CreateZoneRequest } from '@/lib/api';
 
 // Dynamic imports for map components (client-side only)
 const MapContainer = dynamic(
@@ -52,6 +54,10 @@ const WeatherLegend = dynamic(
   () => import('@/components/WeatherLegend'),
   { ssr: false }
 );
+const VelocityParticleLayer = dynamic(
+  () => import('@/components/VelocityParticleLayer'),
+  { ssr: false }
+);
 const ZoneLayer = dynamic(
   () => import('@/components/ZoneLayer'),
   { ssr: false }
@@ -60,13 +66,17 @@ const ZoneEditor = dynamic(
   () => import('@/components/ZoneEditor'),
   { ssr: false }
 );
+const ForecastTimeline = dynamic(
+  () => import('@/components/ForecastTimeline'),
+  { ssr: false }
+);
 
 // Map bounds for Europe/Mediterranean
 const DEFAULT_CENTER: [number, number] = [45, 10];
 const DEFAULT_ZOOM = 5;
 
 type ViewMode = 'edit' | 'results';
-type WeatherLayer = 'wind' | 'waves' | 'none';
+type WeatherLayer = 'wind' | 'waves' | 'currents' | 'none';
 
 export default function HomePage() {
   // Route state
@@ -93,7 +103,13 @@ export default function HomePage() {
   const [weatherLayer, setWeatherLayer] = useState<WeatherLayer>('wind');
   const [windData, setWindData] = useState<WindFieldData | null>(null);
   const [waveData, setWaveData] = useState<WaveFieldData | null>(null);
+  const [windVelocityData, setWindVelocityData] = useState<VelocityData[] | null>(null);
+  const [currentVelocityData, setCurrentVelocityData] = useState<VelocityData[] | null>(null);
   const [isLoadingWeather, setIsLoadingWeather] = useState(false);
+
+  // Forecast timeline state
+  const [forecastEnabled, setForecastEnabled] = useState(false);
+  const [forecastHour, setForecastHour] = useState(0);
 
   // Zone state
   const [showZones, setShowZones] = useState(true);
@@ -111,12 +127,16 @@ export default function HomePage() {
         lon_max: 40,
         resolution: 1.0,
       };
-      const [wind, waves] = await Promise.all([
+      const [wind, waves, windVel, currentVel] = await Promise.all([
         apiClient.getWindField(params),
         apiClient.getWaveField(params),
+        apiClient.getWindVelocity(params),
+        apiClient.getCurrentVelocity(params).catch(() => null),
       ]);
       setWindData(wind);
       setWaveData(waves);
+      setWindVelocityData(windVel);
+      setCurrentVelocityData(currentVel);
     } catch (error) {
       console.error('Failed to load weather:', error);
     } finally {
@@ -127,6 +147,18 @@ export default function HomePage() {
   // Load weather on mount
   useEffect(() => {
     loadWeatherData();
+  }, [loadWeatherData]);
+
+  // Handle forecast hour change from timeline
+  const handleForecastHourChange = useCallback((hour: number, data: VelocityData[] | null) => {
+    setForecastHour(hour);
+    if (data) {
+      // Replace wind velocity data with forecast frame
+      setWindVelocityData(data);
+    } else if (hour === 0) {
+      // Reset to live data — reload
+      loadWeatherData();
+    }
   }, [loadWeatherData]);
 
   // Handle RTZ import
@@ -556,6 +588,20 @@ export default function HomePage() {
                   active={weatherLayer === 'waves'}
                   onClick={() => setWeatherLayer(weatherLayer === 'waves' ? 'none' : 'waves')}
                 />
+                <WeatherLayerButton
+                  icon={<Droplets className="w-4 h-4" />}
+                  label="Currents"
+                  active={weatherLayer === 'currents'}
+                  onClick={() => setWeatherLayer(weatherLayer === 'currents' ? 'none' : 'currents')}
+                />
+                {weatherLayer === 'wind' && (
+                  <WeatherLayerButton
+                    icon={<Clock className="w-4 h-4" />}
+                    label="Forecast"
+                    active={forecastEnabled}
+                    onClick={() => setForecastEnabled(!forecastEnabled)}
+                  />
+                )}
                 <button
                   onClick={loadWeatherData}
                   disabled={isLoadingWeather}
@@ -611,11 +657,16 @@ export default function HomePage() {
                 weatherLayer={weatherLayer}
                 windData={windData}
                 waveData={waveData}
+                windVelocityData={windVelocityData}
+                currentVelocityData={currentVelocityData}
                 showZones={showZones}
                 zoneKey={zoneKey}
                 isDrawingZone={isDrawingZone}
                 onSaveZone={handleSaveZone}
                 onCancelZone={() => setIsDrawingZone(false)}
+                forecastEnabled={forecastEnabled}
+                onForecastClose={() => setForecastEnabled(false)}
+                onForecastHourChange={handleForecastHourChange}
               />
             </Card>
           </div>
@@ -693,11 +744,16 @@ function MapComponent({
   weatherLayer,
   windData,
   waveData,
+  windVelocityData,
+  currentVelocityData,
   showZones = true,
   zoneKey = 0,
   isDrawingZone = false,
   onSaveZone,
   onCancelZone,
+  forecastEnabled = false,
+  onForecastClose,
+  onForecastHourChange,
 }: {
   waypoints: Position[];
   onWaypointsChange: (wps: Position[]) => void;
@@ -705,11 +761,16 @@ function MapComponent({
   weatherLayer: WeatherLayer;
   windData: WindFieldData | null;
   waveData: WaveFieldData | null;
+  windVelocityData: VelocityData[] | null;
+  currentVelocityData: VelocityData[] | null;
   showZones?: boolean;
   zoneKey?: number;
   isDrawingZone?: boolean;
   onSaveZone?: (request: CreateZoneRequest) => Promise<void>;
   onCancelZone?: () => void;
+  forecastEnabled?: boolean;
+  onForecastClose?: () => void;
+  onForecastHourChange?: (hour: number, data: VelocityData[] | null) => void;
 }) {
   const [isMounted, setIsMounted] = useState(false);
 
@@ -726,48 +787,74 @@ function MapComponent({
   }
 
   return (
-    <MapContainer
-      center={DEFAULT_CENTER}
-      zoom={DEFAULT_ZOOM}
-      style={{ height: '100%', width: '100%' }}
-      className="rounded-lg"
-      wheelPxPerZoomLevel={120}
-    >
-      <TileLayer
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-        url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-      />
+    <div className="relative w-full h-full">
+      <MapContainer
+        center={DEFAULT_CENTER}
+        zoom={DEFAULT_ZOOM}
+        style={{ height: '100%', width: '100%' }}
+        className="rounded-lg"
+        wheelPxPerZoomLevel={120}
+      >
+        <TileLayer
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+        />
 
-      {/* Zone Layer */}
-      {showZones && <ZoneLayer key={zoneKey} visible={showZones} />}
+        {/* Zone Layer */}
+        {showZones && <ZoneLayer key={zoneKey} visible={showZones} />}
 
-      {/* Zone Editor (drawing) */}
-      {isDrawingZone && onSaveZone && onCancelZone && (
-        <ZoneEditor
-          isDrawing={isDrawingZone}
-          onSaveZone={onSaveZone}
-          onCancel={onCancelZone}
+        {/* Zone Editor (drawing) */}
+        {isDrawingZone && onSaveZone && onCancelZone && (
+          <ZoneEditor
+            isDrawing={isDrawingZone}
+            onSaveZone={onSaveZone}
+            onCancel={onCancelZone}
+          />
+        )}
+
+        {/* Weather Layers */}
+        {weatherLayer === 'wind' && windData && (
+          <WeatherGridLayer
+            mode="wind"
+            windData={windData}
+            opacity={0.6}
+            showArrows={false}
+          />
+        )}
+        {weatherLayer === 'wind' && windVelocityData && (
+          <VelocityParticleLayer data={windVelocityData} type="wind" />
+        )}
+        {weatherLayer === 'waves' && waveData && (
+          <WeatherGridLayer
+            mode="waves"
+            waveData={waveData}
+          />
+        )}
+        {weatherLayer === 'currents' && currentVelocityData && (
+          <VelocityParticleLayer data={currentVelocityData} type="currents" />
+        )}
+
+        {/* Weather Legend */}
+        {weatherLayer !== 'none' && (
+          <WeatherLegend mode={weatherLayer} timelineVisible={forecastEnabled} />
+        )}
+
+        {/* Waypoint Editor */}
+        <WaypointEditor
+          waypoints={waypoints}
+          onWaypointsChange={onWaypointsChange}
+          isEditing={isEditing}
+        />
+      </MapContainer>
+
+      {/* Forecast Timeline overlay at bottom of map */}
+      {forecastEnabled && onForecastClose && onForecastHourChange && (
+        <ForecastTimeline
+          visible={forecastEnabled}
+          onClose={onForecastClose}
+          onForecastHourChange={onForecastHourChange}
         />
       )}
-
-      {/* Weather Grid Layer */}
-      {weatherLayer !== 'none' && (windData || waveData) && (
-        <WeatherGridLayer
-          mode={weatherLayer}
-          windData={windData}
-          waveData={waveData}
-        />
-      )}
-
-      {/* Weather Legend */}
-      {weatherLayer !== 'none' && <WeatherLegend mode={weatherLayer} />}
-
-      {/* Waypoint Editor */}
-      <WaypointEditor
-        waypoints={waypoints}
-        onWaypointsChange={onWaypointsChange}
-        isEditing={isEditing}
-      />
-    </MapContainer>
+    </div>
   );
 }

@@ -122,6 +122,32 @@ export interface PointWeather {
   };
 }
 
+// Forecast types
+export interface ForecastHourStatus {
+  forecast_hour: number;
+  valid_time: string;
+  cached: boolean;
+}
+
+export interface ForecastStatus {
+  run_date: string;
+  run_hour: string;
+  total_hours: number;
+  cached_hours: number;
+  complete: boolean;
+  prefetch_running: boolean;
+  hours: ForecastHourStatus[];
+}
+
+export interface ForecastFrames {
+  run_date: string;
+  run_hour: string;
+  run_time: string;
+  total_hours: number;
+  cached_hours: number;
+  frames: Record<string, VelocityData[]>;
+}
+
 // Voyage types
 export interface VoyageRequest {
   waypoints: Position[];
@@ -399,8 +425,40 @@ export const apiClient = {
     lon_max?: number;
     resolution?: number;
     time?: string;
+    forecast_hour?: number;
   } = {}): Promise<VelocityData[]> {
     const response = await api.get<VelocityData[]>('/api/weather/wind/velocity', { params });
+    return response.data;
+  },
+
+  // Forecast timeline API
+  async getForecastStatus(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<ForecastStatus> {
+    const response = await api.get<ForecastStatus>('/api/weather/forecast/status', { params });
+    return response.data;
+  },
+
+  async triggerForecastPrefetch(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<{ status: string; message: string }> {
+    const response = await api.post('/api/weather/forecast/prefetch', null, { params });
+    return response.data;
+  },
+
+  async getForecastFrames(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<ForecastFrames> {
+    const response = await api.get<ForecastFrames>('/api/weather/forecast/frames', { params });
     return response.data;
   },
 
@@ -413,6 +471,18 @@ export const apiClient = {
     time?: string;
   } = {}): Promise<WaveFieldData> {
     const response = await api.get<WaveFieldData>('/api/weather/waves', { params });
+    return response.data;
+  },
+
+  async getCurrentVelocity(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+    resolution?: number;
+    time?: string;
+  } = {}): Promise<VelocityData[]> {
+    const response = await api.get<VelocityData[]>('/api/weather/currents/velocity', { params });
     return response.data;
   },
 

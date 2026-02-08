@@ -789,6 +789,365 @@ class SyntheticDataProvider:
         )
 
 
+    def generate_current_field(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        resolution: float = 1.0,
+        time: Optional[datetime] = None,
+    ) -> WeatherData:
+        """Generate synthetic ocean current field.
+
+        Models major surface current patterns:
+        - Gulf Stream / North Atlantic Drift
+        - Mediterranean circulation
+        - General wind-driven surface currents
+        """
+        if time is None:
+            time = datetime.utcnow()
+
+        lats = np.arange(lat_min, lat_max + resolution, resolution)
+        lons = np.arange(lon_min, lon_max + resolution, resolution)
+
+        lon_grid, lat_grid = np.meshgrid(lons, lats)
+
+        # Base eastward drift (wind-driven surface current, ~2% of wind)
+        base_u = 0.15 + 0.1 * np.sin(np.radians(lat_grid * 2))
+        base_v = 0.05 * np.cos(np.radians(lon_grid * 3))
+
+        # Gulf Stream / North Atlantic Drift influence
+        # Strong northeastward flow centered around 40-45N, -40 to 0W
+        gs_lat_center = 42.0
+        gs_strength = 0.8 * np.exp(-((lat_grid - gs_lat_center) ** 2) / 50)
+        gs_u = gs_strength * 0.6
+        gs_v = gs_strength * 0.3
+
+        # Mediterranean counter-clockwise gyre
+        med_lat_center = 37.0
+        med_lon_center = 18.0
+        med_dist = np.sqrt((lat_grid - med_lat_center) ** 2 + (lon_grid - med_lon_center) ** 2)
+        med_strength = 0.3 * np.exp(-med_dist / 8)
+        med_angle = np.arctan2(lat_grid - med_lat_center, lon_grid - med_lon_center)
+        med_u = -med_strength * np.sin(med_angle)
+        med_v = med_strength * np.cos(med_angle)
+
+        u_current = base_u + gs_u + med_u + np.random.randn(*lat_grid.shape) * 0.02
+        v_current = base_v + gs_v + med_v + np.random.randn(*lat_grid.shape) * 0.02
+
+        return WeatherData(
+            parameter="current",
+            time=time,
+            lats=lats,
+            lons=lons,
+            values=np.sqrt(u_current ** 2 + v_current ** 2),
+            unit="m/s",
+            u_component=u_current,
+            v_component=v_current,
+        )
+
+
+class GFSDataProvider:
+    """
+    Near-real-time wind data from NOAA GFS (Global Forecast System).
+
+    GFS provides 0.25° resolution wind data updated every 6 hours,
+    available ~3.5 hours after each model run. This is much more
+    current than ERA5 reanalysis which has a ~5-day lag.
+
+    Data source: NOAA NOMADS GRIB filter (pre-filtered GRIB2 download).
+    """
+
+    # GFS run hours
+    RUN_HOURS = [0, 6, 12, 18]
+
+    # Approximate delay before GFS data becomes available
+    AVAILABILITY_LAG_HOURS = 3.5
+
+    NOMADS_BASE = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
+
+    def __init__(self, cache_dir: str = "data/gfs_cache"):
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _get_latest_run(self) -> Tuple[str, str]:
+        """
+        Determine the latest available GFS run.
+
+        Returns:
+            Tuple of (date_str "YYYYMMDD", hour_str "HH")
+        """
+        now = datetime.utcnow()
+        # Subtract availability lag to find what's actually ready
+        available_time = now - timedelta(hours=self.AVAILABILITY_LAG_HOURS)
+
+        # Round down to nearest GFS run hour
+        run_hour = max(h for h in self.RUN_HOURS if h <= available_time.hour)
+        run_date = available_time.strftime("%Y%m%d")
+
+        return run_date, f"{run_hour:02d}"
+
+    def _to_gfs_lon(self, lon: float) -> float:
+        """Convert -180..180 longitude to GFS 0..360 convention."""
+        return lon % 360
+
+    def _download_grib(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        run_date: str,
+        run_hour: str,
+        forecast_hour: int = 0,
+    ) -> Optional[Path]:
+        """
+        Download a subregion GRIB2 file from NOMADS.
+
+        Args:
+            forecast_hour: GFS forecast hour (0=analysis, 3-120 in 3h steps)
+
+        Returns:
+            Path to downloaded GRIB2 file, or None on failure.
+        """
+        import urllib.request
+        import urllib.parse
+
+        # Convert longitudes to GFS 0-360 convention
+        gfs_lon_min = self._to_gfs_lon(lon_min)
+        gfs_lon_max = self._to_gfs_lon(lon_max)
+
+        # Handle wrap-around (e.g. lon_min=-15 → 345, lon_max=40 → 40)
+        # If gfs_lon_min > gfs_lon_max, the region crosses the prime meridian
+        # in GFS coordinates. NOMADS handles this correctly.
+        if gfs_lon_min > gfs_lon_max:
+            gfs_lon_min = lon_min
+            gfs_lon_max = lon_max
+
+        cache_file = (
+            self.cache_dir
+            / f"gfs_{run_date}_{run_hour}_f{forecast_hour:03d}_lat{lat_min:.0f}_{lat_max:.0f}_lon{lon_min:.0f}_{lon_max:.0f}.grib2"
+        )
+
+        # Use cache if file exists and is from current run
+        if cache_file.exists():
+            logger.info(f"GFS cache hit: {cache_file.name}")
+            return cache_file
+
+        # Build NOMADS GRIB filter URL
+        params = {
+            "file": f"gfs.t{run_hour}z.pgrb2.0p25.f{forecast_hour:03d}",
+            "lev_10_m_above_ground": "on",
+            "var_UGRD": "on",
+            "var_VGRD": "on",
+            "subregion": "",
+            "leftlon": str(gfs_lon_min),
+            "rightlon": str(gfs_lon_max),
+            "toplat": str(lat_max),
+            "bottomlat": str(lat_min),
+            "dir": f"/gfs.{run_date}/{run_hour}/atmos",
+        }
+
+        url = f"{self.NOMADS_BASE}?{urllib.parse.urlencode(params)}"
+        logger.info(f"Downloading GFS GRIB2: run={run_date}/{run_hour}z f{forecast_hour:03d}, region=[{lat_min},{lat_max}]x[{lon_min},{lon_max}]")
+
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Windmar/2.1"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+
+            if len(data) < 100:
+                logger.warning(f"GFS download too small ({len(data)} bytes), likely an error page")
+                return None
+
+            cache_file.write_bytes(data)
+            logger.info(f"GFS GRIB2 saved: {cache_file.name} ({len(data)} bytes)")
+            return cache_file
+
+        except Exception as e:
+            logger.warning(f"GFS download failed: {e}")
+            return None
+
+    def fetch_wind_data(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        time: Optional[datetime] = None,
+        forecast_hour: int = 0,
+    ) -> Optional[WeatherData]:
+        """
+        Fetch near-real-time wind data from GFS.
+
+        Args:
+            forecast_hour: GFS forecast hour (0=analysis, 3-120 in 3h steps)
+
+        Returns:
+            WeatherData with u/v wind components, or None on failure.
+        """
+        try:
+            import pygrib
+        except ImportError:
+            logger.warning("pygrib not installed, GFS provider unavailable")
+            return None
+
+        if time is None:
+            time = datetime.utcnow()
+
+        run_date, run_hour = self._get_latest_run()
+
+        grib_path = self._download_grib(lat_min, lat_max, lon_min, lon_max, run_date, run_hour, forecast_hour)
+        if grib_path is None:
+            return None
+
+        try:
+            grbs = pygrib.open(str(grib_path))
+
+            u_msgs = grbs.select(shortName='10u')
+            v_msgs = grbs.select(shortName='10v')
+
+            if not u_msgs or not v_msgs:
+                logger.warning("GFS GRIB2 missing U/V wind messages")
+                grbs.close()
+                return None
+
+            u_msg = u_msgs[0]
+            v_msg = v_msgs[0]
+
+            u_data = u_msg.values  # 2D numpy array
+            v_data = v_msg.values
+
+            lats_2d, lons_2d = u_msg.latlons()
+
+            # Extract 1D coordinate vectors
+            lats = lats_2d[:, 0]
+            lons = lons_2d[0, :]
+
+            grbs.close()
+
+            # Convert GFS 0-360 longitudes to -180..180
+            lon_shift = lons > 180
+            if np.any(lon_shift):
+                lons[lon_shift] -= 360
+                # Re-sort by longitude to keep ascending order
+                sort_idx = np.argsort(lons)
+                lons = lons[sort_idx]
+                u_data = u_data[:, sort_idx]
+                v_data = v_data[:, sort_idx]
+
+            # Replace NaN with 0 (land pixels in some GRIB files)
+            u_data = np.nan_to_num(u_data, nan=0.0)
+            v_data = np.nan_to_num(v_data, nan=0.0)
+
+            speed = np.sqrt(u_data**2 + v_data**2)
+
+            ref_time = datetime.strptime(f"{run_date}{run_hour}", "%Y%m%d%H") + timedelta(hours=forecast_hour)
+
+            logger.info(
+                f"GFS wind data fetched: {len(lats)}x{len(lons)} grid, "
+                f"run={run_date}/{run_hour}z f{forecast_hour:03d}, "
+                f"valid={ref_time.strftime('%Y-%m-%d %H:%M')}Z, "
+                f"wind range={speed.min():.1f}-{speed.max():.1f} m/s"
+            )
+
+            return WeatherData(
+                parameter="wind",
+                time=ref_time,
+                lats=lats,
+                lons=lons,
+                values=speed,
+                unit="m/s",
+                u_component=u_data,
+                v_component=v_data,
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to parse GFS GRIB2: {e}")
+            return None
+
+    # All GFS forecast hours: f000 to f120 in 3h steps
+    FORECAST_HOURS = list(range(0, 121, 3))  # 41 files
+
+    def prefetch_forecast_hours(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+    ) -> Dict[int, Path]:
+        """
+        Download all forecast hours (f000-f120, 3h steps) for the current GFS run.
+
+        Skips already-cached files. Rate-limits at 2s between NOMADS requests.
+
+        Returns:
+            Dict mapping forecast_hour → Path for successfully downloaded files.
+        """
+        import time as _time
+
+        run_date, run_hour = self._get_latest_run()
+        results: Dict[int, Path] = {}
+
+        for fh in self.FORECAST_HOURS:
+            path = self._download_grib(lat_min, lat_max, lon_min, lon_max, run_date, run_hour, fh)
+            if path is not None:
+                results[fh] = path
+            else:
+                logger.warning(f"Failed to download GFS f{fh:03d}")
+            # Rate limit: only sleep if we actually hit the network (no cache hit)
+            # Check if file was just created (within last 5 seconds)
+            if path is not None and (_time.time() - path.stat().st_mtime) < 5:
+                _time.sleep(2)
+
+        logger.info(f"GFS prefetch complete: {len(results)}/{len(self.FORECAST_HOURS)} forecast hours cached")
+        return results
+
+    def get_cached_forecast_hours(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+    ) -> List[Dict]:
+        """
+        Check which forecast hours are cached for the current GFS run.
+
+        Returns:
+            List of dicts with forecast_hour, valid_time, and cached status.
+        """
+        run_date, run_hour = self._get_latest_run()
+        run_time = datetime.strptime(f"{run_date}{run_hour}", "%Y%m%d%H")
+        result = []
+
+        for fh in self.FORECAST_HOURS:
+            cache_file = (
+                self.cache_dir
+                / f"gfs_{run_date}_{run_hour}_f{fh:03d}_lat{lat_min:.0f}_{lat_max:.0f}_lon{lon_min:.0f}_{lon_max:.0f}.grib2"
+            )
+            valid_time = run_time + timedelta(hours=fh)
+            result.append({
+                "forecast_hour": fh,
+                "valid_time": valid_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "cached": cache_file.exists(),
+            })
+
+        return result
+
+    def clear_old_cache(self, keep_hours: int = 12) -> int:
+        """Remove GRIB cache files older than keep_hours."""
+        cutoff = datetime.utcnow() - timedelta(hours=keep_hours)
+        count = 0
+        for f in self.cache_dir.glob("*.grib2"):
+            if f.stat().st_mtime < cutoff.timestamp():
+                f.unlink()
+                count += 1
+        if count:
+            logger.info(f"Cleared {count} old GFS cache files")
+        return count
+
+
 class ClimatologyProvider:
     """
     Provides climatological (historical average) weather data.

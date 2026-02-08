@@ -1,7 +1,8 @@
 'use client';
 
 interface WeatherLegendProps {
-  mode: 'wind' | 'waves';
+  mode: 'wind' | 'waves' | 'currents';
+  timelineVisible?: boolean;
 }
 
 const WIND_STOPS = [
@@ -21,6 +22,15 @@ const WAVE_STOPS = [
   { value: 5, color: 'rgb(128,0,0)' },
 ];
 
+const CURRENT_STOPS = [
+  { value: 0, color: 'rgb(36,104,180)' },
+  { value: 0.3, color: 'rgb(24,176,200)' },
+  { value: 0.6, color: 'rgb(100,200,160)' },
+  { value: 1.0, color: 'rgb(210,220,100)' },
+  { value: 1.5, color: 'rgb(250,180,60)' },
+  { value: 2.0, color: 'rgb(250,140,40)' },
+];
+
 function buildGradient(stops: { value: number; color: string }[]): string {
   const max = stops[stops.length - 1].value;
   const parts = stops.map(
@@ -29,14 +39,14 @@ function buildGradient(stops: { value: number; color: string }[]): string {
   return `linear-gradient(to right, ${parts.join(', ')})`;
 }
 
-export default function WeatherLegend({ mode }: WeatherLegendProps) {
-  const stops = mode === 'wind' ? WIND_STOPS : WAVE_STOPS;
-  const unit = mode === 'wind' ? 'm/s' : 'm';
-  const label = mode === 'wind' ? 'Wind Speed' : 'Wave Height';
+export default function WeatherLegend({ mode, timelineVisible = false }: WeatherLegendProps) {
+  const stops = mode === 'wind' ? WIND_STOPS : mode === 'currents' ? CURRENT_STOPS : WAVE_STOPS;
+  const unit = mode === 'waves' ? 'm' : 'm/s';
+  const label = mode === 'wind' ? 'Wind Speed' : mode === 'currents' ? 'Current Speed' : 'Wave Height';
   const gradient = buildGradient(stops);
 
   return (
-    <div className="absolute bottom-4 right-4 bg-maritime-dark/90 backdrop-blur-sm rounded-lg p-3 z-[1000] min-w-[180px]">
+    <div className={`absolute right-4 bg-maritime-dark/90 backdrop-blur-sm rounded-lg p-3 z-[1000] min-w-[180px] transition-all ${timelineVisible ? 'bottom-20' : 'bottom-4'}`}>
       <div className="text-xs text-gray-400 mb-2 font-medium">
         {label} ({unit})
       </div>

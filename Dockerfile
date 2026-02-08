@@ -81,7 +81,7 @@ COPY --chown=windmar:windmar api/ ./api/
 COPY --chown=windmar:windmar LICENSE ./
 
 # Create necessary directories with correct permissions
-RUN mkdir -p data/grib data/vessel_database data/calibration data/weather_cache logs \
+RUN mkdir -p data/grib data/gfs_cache data/vessel_database data/calibration data/weather_cache logs \
     && chown -R windmar:windmar /app
 
 # Switch to non-root user

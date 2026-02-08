@@ -97,3 +97,17 @@ a {
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
+
+/* leaflet-velocity control dark theme override */
+.leaflet-control.velocity-control {
+  background: rgba(10, 22, 40, 0.85) !important;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  border-radius: 8px !important;
+  color: #d1d5db !important;
+  padding: 6px 10px !important;
+  font-size: 12px !important;
+  font-family: inherit !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3) !important;
+}

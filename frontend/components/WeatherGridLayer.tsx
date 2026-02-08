@@ -8,6 +8,7 @@ interface WeatherGridLayerProps {
   windData?: WindFieldData | null;
   waveData?: WaveFieldData | null;
   opacity?: number;
+  showArrows?: boolean;
 }
 
 // Wind color scale: m/s → RGBA
@@ -136,6 +137,7 @@ function WeatherGridLayerInner({
   windData,
   waveData,
   opacity = 0.7,
+  showArrows = true,
 }: WeatherGridLayerProps) {
   const { useMap } = require('react-leaflet');
   const L = require('leaflet');
@@ -286,7 +288,7 @@ function WeatherGridLayerInner({
         ctx.drawImage(offscreen, 0, 0, DS, DS, 0, 0, 256, 256);
 
         // Draw wind arrows on top (sparse, every ~40px)
-        if (mode === 'wind' && uData && vData) {
+        if (showArrows && mode === 'wind' && uData && vData) {
           const arrowSpacing = 40;
           ctx.save();
           for (let ay = arrowSpacing / 2; ay < 256; ay += arrowSpacing) {
