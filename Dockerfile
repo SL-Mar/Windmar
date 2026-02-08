@@ -78,10 +78,11 @@ COPY --from=builder /build/deps /app/deps
 # Copy application code
 COPY --chown=windmar:windmar src/ ./src/
 COPY --chown=windmar:windmar api/ ./api/
+COPY --chown=windmar:windmar docker/migrations/ ./docker/migrations/
 COPY --chown=windmar:windmar LICENSE ./
 
 # Create necessary directories with correct permissions
-RUN mkdir -p data/grib data/gfs_cache data/vessel_database data/calibration data/weather_cache logs \
+RUN mkdir -p data/grib data/gfs_cache data/vessel_database data/calibration data/weather_cache data/copernicus_cache data/climatology_cache logs \
     && chown -R windmar:windmar /app
 
 # Switch to non-root user

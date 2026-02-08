@@ -11,15 +11,21 @@ Version: 2.1.0
 License: Apache 2.0 - See LICENSE file
 """
 
+import asyncio
 import io
 import logging
 import math
 import os
-from datetime import datetime, timedelta
+import pickle
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+try:
+    import redis as redis_lib
+except ImportError:
+    redis_lib = None
 from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile, File, Query, Response, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, JSONResponse
@@ -40,6 +46,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.optimization.vessel_model import VesselModel, VesselSpecs
 from src.optimization.voyage import VoyageCalculator, LegWeather
 from src.optimization.route_optimizer import RouteOptimizer, OptimizedRoute
+from src.optimization.grid_weather_provider import GridWeatherProvider
+from src.optimization.monte_carlo import MonteCarloSimulator, MonteCarloResult as MCResult
 from src.optimization.vessel_calibration import (
     VesselCalibrator, NoonReport, CalibrationFactors, create_calibrated_model
 )
@@ -70,6 +78,12 @@ from src.data.copernicus import (
     CopernicusDataProvider, SyntheticDataProvider, GFSDataProvider, WeatherData,
     ClimatologyProvider, UnifiedWeatherProvider, WeatherDataSource
 )
+try:
+    from src.data.db_weather_provider import DbWeatherProvider
+    from src.data.weather_ingestion import WeatherIngestionService
+except ImportError:
+    DbWeatherProvider = None
+    WeatherIngestionService = None
 
 
 def _apply_ocean_mask_velocity(u: np.ndarray, v: np.ndarray, lats: np.ndarray, lons: np.ndarray) -> tuple:
@@ -195,6 +209,59 @@ Contact: support@windmar.io
         )
 
     return application
+
+
+# =============================================================================
+# Database Migration Runner
+# =============================================================================
+
+def _run_weather_migrations():
+    """Apply weather table migrations if they don't exist yet."""
+    db_url = os.environ.get("DATABASE_URL", settings.database_url)
+    if not db_url.startswith("postgresql"):
+        logger.info("Skipping weather migrations (non-PostgreSQL database)")
+        return
+    try:
+        import psycopg2
+    except ImportError:
+        logger.warning("psycopg2 not installed, skipping weather migrations")
+        return
+
+    try:
+        conn = psycopg2.connect(db_url)
+        conn.autocommit = True
+        cur = conn.cursor()
+
+        # Use advisory lock to prevent concurrent migration by multiple workers
+        cur.execute("SELECT pg_try_advisory_lock(20250208)")
+        got_lock = cur.fetchone()[0]
+        if not got_lock:
+            logger.info("Another worker is running weather migrations, skipping")
+            conn.close()
+            return
+
+        try:
+            # Check if tables already exist
+            cur.execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_name = 'weather_forecast_runs'"
+            )
+            if cur.fetchone():
+                logger.info("Weather tables already exist")
+                return
+
+            # Apply migration
+            migration_path = Path(__file__).parent.parent / "docker" / "migrations" / "001_weather_tables.sql"
+            if migration_path.exists():
+                sql = migration_path.read_text()
+                cur.execute(sql)
+                logger.info("Weather database migration applied successfully")
+            else:
+                logger.warning(f"Migration file not found: {migration_path}")
+        finally:
+            cur.execute("SELECT pg_advisory_unlock(20250208)")
+            conn.close()
+    except Exception as e:
+        logger.error(f"Failed to run weather migrations: {e}")
 
 
 # Create the application
@@ -377,6 +444,36 @@ class VoyageResponse(BaseModel):
     data_sources: Optional[DataSourceSummary] = None
 
 
+class MonteCarloRequest(BaseModel):
+    """Request for Monte Carlo voyage simulation."""
+    waypoints: List[Position]
+    calm_speed_kts: float = Field(..., gt=0, lt=30)
+    is_laden: bool = True
+    departure_time: Optional[datetime] = None
+    n_simulations: int = Field(100, ge=10, le=500)
+
+
+class PercentileFloat(BaseModel):
+    p10: float
+    p50: float
+    p90: float
+
+
+class PercentileString(BaseModel):
+    p10: str
+    p50: str
+    p90: str
+
+
+class MonteCarloResponse(BaseModel):
+    """Monte Carlo simulation result."""
+    n_simulations: int
+    eta: PercentileString
+    fuel_mt: PercentileFloat
+    total_time_hours: PercentileFloat
+    computation_time_ms: float
+
+
 class WindDataPoint(BaseModel):
     """Wind data at a point."""
     lat: float
@@ -468,6 +565,7 @@ class CalibrationResponse(BaseModel):
 current_vessel_specs = VesselSpecs()
 current_vessel_model = VesselModel(specs=current_vessel_specs)
 voyage_calculator = VoyageCalculator(vessel_model=current_vessel_model)
+monte_carlo_sim = MonteCarloSimulator(voyage_calculator=voyage_calculator)
 route_optimizer = RouteOptimizer(vessel_model=current_vessel_model)
 
 # Vessel calibration state
@@ -503,10 +601,71 @@ synthetic_provider = SyntheticDataProvider()
 # GFS near-real-time wind provider (NOAA, updated every 6h)
 gfs_provider = GFSDataProvider(cache_dir="data/gfs_cache")
 
-# Cached weather data
+# =============================================================================
+# Redis Shared Cache (replaces per-worker in-memory dict)
+# =============================================================================
+CACHE_TTL_MINUTES = 60
+_redis_client = None  # Optional[redis.Redis]
+
+def _get_redis():
+    """Lazy-init Redis client. Returns None if unavailable."""
+    global _redis_client
+    if redis_lib is None:
+        return None
+    if _redis_client is not None:
+        return _redis_client
+    try:
+        redis_url = os.environ.get("REDIS_URL", settings.redis_url)
+        _redis_client = redis_lib.Redis.from_url(redis_url, decode_responses=False)
+        _redis_client.ping()
+        logger.info("Redis connected for weather cache")
+        return _redis_client
+    except Exception as e:
+        logger.warning(f"Redis unavailable, falling back to in-memory cache: {e}")
+        return None
+
+# Fallback in-memory cache (used only when Redis is down)
 _weather_cache: Dict[str, WeatherData] = {}
 _cache_expiry: Dict[str, datetime] = {}
-CACHE_TTL_MINUTES = 60
+
+def _redis_cache_get(key: str) -> Optional[WeatherData]:
+    """Get from Redis, falling back to in-memory."""
+    r = _get_redis()
+    if r is not None:
+        try:
+            data = r.get(f"wx:{key}")
+            if data:
+                return pickle.loads(data)
+        except Exception:
+            pass
+    # Fallback to in-memory
+    if key in _weather_cache and key in _cache_expiry and datetime.utcnow() < _cache_expiry[key]:
+        return _weather_cache[key]
+    return None
+
+def _redis_cache_put(key: str, data: WeatherData, ttl_seconds: int = 900):
+    """Put to Redis, falling back to in-memory."""
+    r = _get_redis()
+    if r is not None:
+        try:
+            r.setex(f"wx:{key}", ttl_seconds, pickle.dumps(data))
+            return
+        except Exception:
+            pass
+    # Fallback to in-memory
+    _weather_cache[key] = data
+    _cache_expiry[key] = datetime.utcnow() + timedelta(seconds=ttl_seconds)
+
+# =============================================================================
+# Database Weather Provider
+# =============================================================================
+_db_url = os.environ.get("DATABASE_URL", settings.database_url)
+db_weather = None
+weather_ingestion = None
+
+if _db_url.startswith("postgresql") and DbWeatherProvider is not None:
+    db_weather = DbWeatherProvider(_db_url)
+    weather_ingestion = WeatherIngestionService(_db_url, copernicus_provider, gfs_provider)
 
 
 # ============================================================================
@@ -518,13 +677,6 @@ def _get_cache_key(data_type: str, lat_min: float, lat_max: float, lon_min: floa
     return f"{data_type}_{lat_min:.1f}_{lat_max:.1f}_{lon_min:.1f}_{lon_max:.1f}"
 
 
-def _is_cache_valid(key: str) -> bool:
-    """Check if cached data is still valid."""
-    if key not in _cache_expiry:
-        return False
-    return datetime.utcnow() < _cache_expiry[key]
-
-
 def get_wind_field(
     lat_min: float, lat_max: float,
     lon_min: float, lon_max: float,
@@ -534,19 +686,28 @@ def get_wind_field(
     """
     Get wind field data.
 
-    Provider chain: GFS (near-real-time) → ERA5 (reanalysis) → Synthetic.
+    Provider chain: Redis cache → DB (pre-ingested) → GFS live → ERA5 → Synthetic.
     """
     if time is None:
         time = datetime.utcnow()
 
     cache_key = _get_cache_key("wind", lat_min, lat_max, lon_min, lon_max)
 
-    # Check cache
-    if cache_key in _weather_cache and _is_cache_valid(cache_key):
+    # Check Redis/in-memory cache
+    cached = _redis_cache_get(cache_key)
+    if cached is not None:
         logger.debug(f"Using cached wind data for {cache_key}")
-        return _weather_cache[cache_key]
+        return cached
 
-    # Try GFS first (near-real-time, ~3.5h lag)
+    # Try DB first (pre-ingested grids — sub-second)
+    if db_weather is not None:
+        wind_data = db_weather.get_wind_from_db(lat_min, lat_max, lon_min, lon_max, time)
+        if wind_data is not None:
+            logger.info("Using DB pre-ingested wind data")
+            _redis_cache_put(cache_key, wind_data, CACHE_TTL_MINUTES * 60)
+            return wind_data
+
+    # Try GFS live (near-real-time, ~3.5h lag)
     wind_data = gfs_provider.fetch_wind_data(lat_min, lat_max, lon_min, lon_max, time)
     if wind_data is not None:
         logger.info("Using GFS near-real-time wind data")
@@ -562,10 +723,7 @@ def get_wind_field(
                 lat_min, lat_max, lon_min, lon_max, resolution, time
             )
 
-    # Cache the result
-    _weather_cache[cache_key] = wind_data
-    _cache_expiry[cache_key] = datetime.utcnow() + timedelta(minutes=CACHE_TTL_MINUTES)
-
+    _redis_cache_put(cache_key, wind_data, CACHE_TTL_MINUTES * 60)
     return wind_data
 
 
@@ -576,18 +734,26 @@ def get_wave_field(
     wind_data: WeatherData = None,
 ) -> WeatherData:
     """
-    Get wave field from Copernicus or synthetic fallback.
+    Get wave field data.
 
-    Tries CMEMS first, falls back to synthetic data based on wind.
+    Provider chain: Redis cache → DB (pre-ingested) → CMEMS live → Synthetic.
     """
     cache_key = _get_cache_key("wave", lat_min, lat_max, lon_min, lon_max)
 
-    # Check cache
-    if cache_key in _weather_cache and _is_cache_valid(cache_key):
+    cached = _redis_cache_get(cache_key)
+    if cached is not None:
         logger.debug(f"Using cached wave data for {cache_key}")
-        return _weather_cache[cache_key]
+        return cached
 
-    # Try Copernicus first
+    # Try DB first
+    if db_weather is not None:
+        wave_data = db_weather.get_wave_from_db(lat_min, lat_max, lon_min, lon_max)
+        if wave_data is not None:
+            logger.info("Using DB pre-ingested wave data")
+            _redis_cache_put(cache_key, wave_data, CACHE_TTL_MINUTES * 60)
+            return wave_data
+
+    # Try CMEMS live
     wave_data = copernicus_provider.fetch_wave_data(lat_min, lat_max, lon_min, lon_max)
 
     if wave_data is None:
@@ -596,10 +762,7 @@ def get_wave_field(
             lat_min, lat_max, lon_min, lon_max, resolution, wind_data
         )
 
-    # Cache the result
-    _weather_cache[cache_key] = wave_data
-    _cache_expiry[cache_key] = datetime.utcnow() + timedelta(minutes=CACHE_TTL_MINUTES)
-
+    _redis_cache_put(cache_key, wave_data, CACHE_TTL_MINUTES * 60)
     return wave_data
 
 
@@ -609,15 +772,25 @@ def get_current_field(
     resolution: float = 1.0,
 ) -> WeatherData:
     """
-    Get ocean current field from CMEMS or synthetic fallback.
+    Get ocean current field.
 
-    Always returns data (synthetic fallback guarantees availability).
+    Provider chain: Redis cache → DB (pre-ingested) → CMEMS live → Synthetic.
     """
     cache_key = _get_cache_key("current", lat_min, lat_max, lon_min, lon_max)
 
-    if cache_key in _weather_cache and _is_cache_valid(cache_key):
-        return _weather_cache[cache_key]
+    cached = _redis_cache_get(cache_key)
+    if cached is not None:
+        return cached
 
+    # Try DB first
+    if db_weather is not None:
+        current_data = db_weather.get_current_from_db(lat_min, lat_max, lon_min, lon_max)
+        if current_data is not None:
+            logger.info("Using DB pre-ingested current data")
+            _redis_cache_put(cache_key, current_data, CACHE_TTL_MINUTES * 60)
+            return current_data
+
+    # Try CMEMS live
     current_data = copernicus_provider.fetch_current_data(lat_min, lat_max, lon_min, lon_max)
 
     if current_data is None:
@@ -626,9 +799,7 @@ def get_current_field(
             lat_min, lat_max, lon_min, lon_max, resolution
         )
 
-    _weather_cache[cache_key] = current_data
-    _cache_expiry[cache_key] = datetime.utcnow() + timedelta(minutes=CACHE_TTL_MINUTES)
-
+    _redis_cache_put(cache_key, current_data, CACHE_TTL_MINUTES * 60)
     return current_data
 
 
@@ -1189,6 +1360,207 @@ async def api_get_forecast_frames(
     }
 
 
+# =========================================================================
+# Wave Forecast Endpoints (CMEMS)
+# =========================================================================
+
+_wave_prefetch_running = False
+_wave_prefetch_lock = None
+
+def _get_wave_prefetch_lock():
+    global _wave_prefetch_lock
+    if _wave_prefetch_lock is None:
+        import threading
+        _wave_prefetch_lock = threading.Lock()
+    return _wave_prefetch_lock
+
+# File-based cache for wave forecast frames (shared across workers)
+_WAVE_CACHE_DIR = Path("/tmp/windmar_wave_cache")
+_WAVE_CACHE_DIR.mkdir(exist_ok=True)
+
+def _wave_cache_path(cache_key: str) -> Path:
+    return _WAVE_CACHE_DIR / f"{cache_key}.json"
+
+def _wave_cache_get(cache_key: str) -> dict | None:
+    p = _wave_cache_path(cache_key)
+    if p.exists():
+        try:
+            import json as _json
+            return _json.loads(p.read_text())
+        except Exception:
+            return None
+    return None
+
+def _wave_cache_put(cache_key: str, data: dict):
+    import json as _json
+    p = _wave_cache_path(cache_key)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(_json.dumps(data))
+    tmp.rename(p)  # atomic on same filesystem
+
+
+@app.get("/api/weather/forecast/wave/status")
+async def api_get_wave_forecast_status(
+    lat_min: float = Query(30.0),
+    lat_max: float = Query(60.0),
+    lon_min: float = Query(-15.0),
+    lon_max: float = Query(40.0),
+):
+    """Get wave forecast prefetch status."""
+    cache_key = f"wave_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+    cached = _wave_cache_get(cache_key)
+    total_hours = 41  # 0-120h every 3h
+
+    if cached:
+        cached_hours = len(cached.get("frames", {}))
+        return {
+            "run_date": cached.get("run_time", "")[:8] if cached.get("run_time") else "",
+            "run_hour": cached.get("run_time", "")[9:11] if cached.get("run_time") else "00",
+            "total_hours": total_hours,
+            "cached_hours": cached_hours,
+            "complete": cached_hours >= total_hours,
+            "prefetch_running": _wave_prefetch_running,
+            "hours": [],
+        }
+
+    return {
+        "run_date": "",
+        "run_hour": "00",
+        "total_hours": total_hours,
+        "cached_hours": 0,
+        "complete": False,
+        "prefetch_running": _wave_prefetch_running,
+        "hours": [],
+    }
+
+
+@app.post("/api/weather/forecast/wave/prefetch")
+async def api_trigger_wave_forecast_prefetch(
+    background_tasks: BackgroundTasks,
+    lat_min: float = Query(30.0),
+    lat_max: float = Query(60.0),
+    lon_min: float = Query(-15.0),
+    lon_max: float = Query(40.0),
+):
+    """Trigger background download of CMEMS wave forecast (0-120h)."""
+    global _wave_prefetch_running
+
+    lock = _get_wave_prefetch_lock()
+    if not lock.acquire(blocking=False):
+        return {"status": "already_running", "message": "Wave prefetch is already in progress"}
+    lock.release()
+
+    def _do_wave_prefetch():
+        global _wave_prefetch_running
+        pflock = _get_wave_prefetch_lock()
+        if not pflock.acquire(blocking=False):
+            return
+        try:
+            _wave_prefetch_running = True
+            logger.info("CMEMS wave forecast prefetch started")
+
+            result = copernicus_provider.fetch_wave_forecast(lat_min, lat_max, lon_min, lon_max)
+            if result is None:
+                logger.error("Wave forecast fetch returned None")
+                return
+
+            # Build ocean mask once
+            mask_lats_arr, mask_lons_arr, ocean_mask_arr = _build_ocean_mask(
+                lat_min, lat_max, lon_min, lon_max
+            )
+
+            # Get shared coordinates from first frame, subsampled for JSON size
+            first_wd = next(iter(result.values()))
+            STEP = 4  # subsample every 4th point (16x reduction)
+            shared_lats = first_wd.lats[::STEP].tolist()
+            shared_lons = first_wd.lons[::STEP].tolist()
+
+            import numpy as np
+
+            def _subsample_round(arr):
+                """Subsample 2D array and round to 2 decimals."""
+                if arr is None:
+                    return None
+                sub = arr[::STEP, ::STEP]
+                return np.round(sub, 2).tolist()
+
+            frames = {}
+            for fh, wd in sorted(result.items()):
+                frame = {
+                    "data": _subsample_round(wd.values),
+                }
+                if wd.wave_direction is not None:
+                    frame["direction"] = _subsample_round(wd.wave_direction)
+
+                has_decomp = wd.windwave_height is not None and wd.swell_height is not None
+                if has_decomp:
+                    frame["windwave"] = {
+                        "height": _subsample_round(wd.windwave_height),
+                        "period": _subsample_round(wd.windwave_period),
+                        "direction": _subsample_round(wd.windwave_direction),
+                    }
+                    frame["swell"] = {
+                        "height": _subsample_round(wd.swell_height),
+                        "period": _subsample_round(wd.swell_period),
+                        "direction": _subsample_round(wd.swell_direction),
+                    }
+
+                frames[str(fh)] = frame
+
+            cache_key = f"wave_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+            _wave_cache_put(cache_key, {
+                "run_time": first_wd.time.isoformat() if first_wd.time else "",
+                "total_hours": 41,
+                "cached_hours": len(frames),
+                "lats": shared_lats,
+                "lons": shared_lons,
+                "ny": len(shared_lats),
+                "nx": len(shared_lons),
+                "ocean_mask": ocean_mask_arr,
+                "ocean_mask_lats": mask_lats_arr,
+                "ocean_mask_lons": mask_lons_arr,
+                "colorscale": {"min": 0, "max": 6, "colors": ["#00ff00", "#ffff00", "#ff8800", "#ff0000", "#800000"]},
+                "frames": frames,
+            })
+            logger.info(f"Wave forecast cached: {len(frames)} frames")
+
+        except Exception as e:
+            logger.error(f"Wave forecast prefetch failed: {e}")
+        finally:
+            _wave_prefetch_running = False
+            pflock.release()
+
+    background_tasks.add_task(_do_wave_prefetch)
+    return {"status": "started", "message": "Wave forecast prefetch triggered in background"}
+
+
+@app.get("/api/weather/forecast/wave/frames")
+async def api_get_wave_forecast_frames(
+    lat_min: float = Query(30.0),
+    lat_max: float = Query(60.0),
+    lon_min: float = Query(-15.0),
+    lon_max: float = Query(40.0),
+):
+    """Return all cached CMEMS wave forecast frames."""
+    cache_key = f"wave_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+    cached = _wave_cache_get(cache_key)
+
+    if not cached:
+        return {
+            "run_time": "",
+            "total_hours": 41,
+            "cached_hours": 0,
+            "lats": [],
+            "lons": [],
+            "ny": 0,
+            "nx": 0,
+            "colorscale": {"min": 0, "max": 6, "colors": []},
+            "frames": {},
+        }
+
+    return cached
+
+
 @app.get("/api/weather/waves")
 async def api_get_wave_field(
     lat_min: float = Query(30.0),
@@ -1242,6 +1614,10 @@ async def api_get_wave_field(
             "colors": ["#00ff00", "#ffff00", "#ff8800", "#ff0000", "#800000"],
         },
     }
+
+    # Include mean wave direction grid (degrees, meteorological convention)
+    if wave_data.wave_direction is not None:
+        response["direction"] = wave_data.wave_direction.tolist()
 
     # Include wave decomposition when available
     has_decomp = wave_data.windwave_height is not None and wave_data.swell_height is not None
@@ -1626,13 +2002,74 @@ async def calculate_voyage(request: VoyageRequest):
     )
 
 
+@app.post("/api/voyage/monte-carlo", response_model=MonteCarloResponse)
+async def monte_carlo_simulation(request: MonteCarloRequest):
+    """
+    Run Monte Carlo simulation on a voyage.
+
+    Perturbs weather conditions across N simulations and returns
+    P10/P50/P90 confidence intervals for ETA, fuel, and time.
+    """
+    import asyncio
+
+    if len(request.waypoints) < 2:
+        raise HTTPException(status_code=400, detail="At least 2 waypoints required")
+
+    departure = request.departure_time or datetime.utcnow()
+
+    wps = [(wp.lat, wp.lon) for wp in request.waypoints]
+    route = create_route_from_waypoints(wps, "MC Simulation Route")
+
+    def _run():
+        return monte_carlo_sim.run(
+            route=route,
+            calm_speed_kts=request.calm_speed_kts,
+            is_laden=request.is_laden,
+            departure_time=departure,
+            weather_provider=weather_provider,
+            n_simulations=request.n_simulations,
+        )
+
+    try:
+        mc_result = await asyncio.to_thread(_run)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Monte Carlo simulation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Simulation failed: {str(e)}")
+
+    return MonteCarloResponse(
+        n_simulations=mc_result.n_simulations,
+        eta=PercentileString(
+            p10=mc_result.eta_p10,
+            p50=mc_result.eta_p50,
+            p90=mc_result.eta_p90,
+        ),
+        fuel_mt=PercentileFloat(
+            p10=mc_result.fuel_p10,
+            p50=mc_result.fuel_p50,
+            p90=mc_result.fuel_p90,
+        ),
+        total_time_hours=PercentileFloat(
+            p10=mc_result.time_p10,
+            p50=mc_result.time_p50,
+            p90=mc_result.time_p90,
+        ),
+        computation_time_ms=mc_result.computation_time_ms,
+    )
+
+
 @app.get("/api/voyage/weather-along-route")
 async def get_weather_along_route(
     waypoints: str = Query(..., description="Comma-separated lat,lon pairs: lat1,lon1;lat2,lon2;..."),
     time: Optional[datetime] = None,
+    interpolation_points: int = Query(5, ge=1, le=20, description="Points to interpolate per leg"),
 ):
     """
-    Get weather conditions at each waypoint and leg midpoint.
+    Get weather conditions along a route with distance-indexed interpolation.
+
+    Returns weather at waypoints plus interpolated points along each leg,
+    with cumulative distance for chart display.
     """
     if time is None:
         time = datetime.utcnow()
@@ -1649,20 +2086,72 @@ async def get_weather_along_route(
     if len(wps) < 2:
         raise HTTPException(status_code=400, detail="At least 2 waypoints required")
 
-    # Get weather at each point
-    result = []
-    for i, (lat, lon) in enumerate(wps):
-        wx = get_weather_at_point(lat, lon, time)
-        result.append({
-            "waypoint_index": i,
-            "position": {"lat": lat, "lon": lon},
+    # Build interpolated points along great circle per leg
+    points = []
+    cumulative_nm = 0.0
+
+    for i in range(len(wps)):
+        lat, lon = wps[i]
+
+        if i > 0:
+            prev_lat, prev_lon = wps[i - 1]
+
+            # Interpolate along the leg (skip first point — already added as prev waypoint)
+            for j in range(1, interpolation_points):
+                frac = j / interpolation_points
+                # Linear interpolation (good enough for nearby points)
+                ilat = prev_lat + (lat - prev_lat) * frac
+                ilon = prev_lon + (lon - prev_lon) * frac
+
+                seg_dist = haversine_distance(
+                    prev_lat if j == 1 else points[-1]["lat"],
+                    prev_lon if j == 1 else points[-1]["lon"],
+                    ilat, ilon,
+                )
+                cumulative_nm += seg_dist
+
+                wx, _ = get_weather_at_point(ilat, ilon, time)
+                points.append({
+                    "distance_nm": round(cumulative_nm, 1),
+                    "lat": round(ilat, 4),
+                    "lon": round(ilon, 4),
+                    "wind_speed_kts": round(wx['wind_speed_ms'] * 1.94384, 1),
+                    "wind_dir_deg": round(wx['wind_dir_deg'], 0),
+                    "wave_height_m": round(wx['sig_wave_height_m'], 1),
+                    "wave_dir_deg": round(wx['wave_dir_deg'], 0),
+                    "current_speed_ms": round(wx['current_speed_ms'], 2),
+                    "current_dir_deg": round(wx['current_dir_deg'], 0),
+                    "is_waypoint": False,
+                    "waypoint_index": None,
+                })
+
+            # Distance from last interpolated point to this waypoint
+            if points:
+                seg_dist = haversine_distance(points[-1]["lat"], points[-1]["lon"], lat, lon)
+                cumulative_nm += seg_dist
+            # else first waypoint at distance 0
+
+        # Add waypoint itself
+        wx, _ = get_weather_at_point(lat, lon, time)
+        points.append({
+            "distance_nm": round(cumulative_nm, 1),
+            "lat": round(lat, 4),
+            "lon": round(lon, 4),
             "wind_speed_kts": round(wx['wind_speed_ms'] * 1.94384, 1),
             "wind_dir_deg": round(wx['wind_dir_deg'], 0),
             "wave_height_m": round(wx['sig_wave_height_m'], 1),
             "wave_dir_deg": round(wx['wave_dir_deg'], 0),
+            "current_speed_ms": round(wx['current_speed_ms'], 2),
+            "current_dir_deg": round(wx['current_dir_deg'], 0),
+            "is_waypoint": True,
+            "waypoint_index": i,
         })
 
-    return {"time": time.isoformat(), "waypoints": result}
+    return {
+        "time": time.isoformat(),
+        "total_distance_nm": round(cumulative_nm, 1),
+        "points": points,
+    }
 
 
 # ============================================================================
@@ -1696,13 +2185,27 @@ async def optimize_route(request: OptimizationRequest):
     route_optimizer.optimization_target = request.optimization_target
 
     try:
+        # Pre-fetch weather for the corridor bounding box (single bulk fetch)
+        margin = 5.0
+        lat_min = min(request.origin.lat, request.destination.lat) - margin
+        lat_max = max(request.origin.lat, request.destination.lat) + margin
+        lon_min = min(request.origin.lon, request.destination.lon) - margin
+        lon_max = max(request.origin.lon, request.destination.lon) + margin
+        lat_min, lat_max = max(lat_min, -85), min(lat_max, 85)
+
+        wind = get_wind_field(lat_min, lat_max, lon_min, lon_max, request.grid_resolution_deg, departure)
+        waves = get_wave_field(lat_min, lat_max, lon_min, lon_max, request.grid_resolution_deg, wind)
+        currents = get_current_field(lat_min, lat_max, lon_min, lon_max, request.grid_resolution_deg)
+
+        grid_wx = GridWeatherProvider(wind, waves, currents)
+
         result = route_optimizer.optimize_route(
             origin=(request.origin.lat, request.origin.lon),
             destination=(request.destination.lat, request.destination.lon),
             departure_time=departure,
             calm_speed_kts=request.calm_speed_kts,
             is_laden=request.is_laden,
-            weather_provider=weather_provider,
+            weather_provider=grid_wx.get_weather,
         )
 
         # Format response
@@ -2376,6 +2879,92 @@ async def check_path_zones(
         "penalty_factor": penalty if penalty != float('inf') else None,
         "is_forbidden": penalty == float('inf'),
         "warnings": warnings,
+    }
+
+
+# ============================================================================
+# Weather Ingestion Endpoints & Background Loop
+# ============================================================================
+
+_ingestion_running = False
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Run migrations and start background weather ingestion."""
+    _run_weather_migrations()
+
+    # Start background ingestion loop
+    if weather_ingestion is not None:
+        asyncio.create_task(_ingestion_loop())
+        logger.info("Weather ingestion background loop started")
+
+
+async def _ingestion_loop():
+    """Background task: ingest weather every 6 hours."""
+    global _ingestion_running
+
+    # Wait 30s after startup to let other services initialize
+    await asyncio.sleep(30)
+
+    while True:
+        if weather_ingestion is None:
+            break
+        try:
+            _ingestion_running = True
+            logger.info("Background weather ingestion starting")
+            await asyncio.to_thread(weather_ingestion.ingest_all)
+            logger.info("Background weather ingestion complete")
+        except Exception as e:
+            logger.error(f"Background weather ingestion failed: {e}")
+        finally:
+            _ingestion_running = False
+
+        await asyncio.sleep(6 * 3600)  # 6 hours
+
+
+@app.post("/api/weather/ingest", tags=["Weather"])
+async def trigger_weather_ingestion():
+    """Trigger an immediate weather ingestion cycle."""
+    global _ingestion_running
+
+    if weather_ingestion is None:
+        raise HTTPException(status_code=503, detail="Weather ingestion not configured (no PostgreSQL)")
+
+    if _ingestion_running:
+        return {"status": "already_running", "message": "Ingestion is already in progress"}
+
+    async def _run():
+        global _ingestion_running
+        try:
+            _ingestion_running = True
+            await asyncio.to_thread(weather_ingestion.ingest_all)
+        except Exception as e:
+            logger.error(f"Manual ingestion failed: {e}")
+        finally:
+            _ingestion_running = False
+
+    asyncio.create_task(_run())
+    return {"status": "started", "message": "Weather ingestion triggered in background"}
+
+
+@app.get("/api/weather/ingest/status", tags=["Weather"])
+async def get_ingestion_status():
+    """Get status of weather data ingestion."""
+    if weather_ingestion is None:
+        return {
+            "configured": False,
+            "message": "Weather ingestion not configured (no PostgreSQL)",
+        }
+
+    status = weather_ingestion.get_latest_status()
+    freshness = db_weather.get_freshness() if db_weather else None
+
+    return {
+        "configured": True,
+        "ingesting": _ingestion_running,
+        "freshness": freshness,
+        **status,
     }
 
 
