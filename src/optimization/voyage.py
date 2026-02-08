@@ -29,6 +29,15 @@ class LegWeather:
     current_speed_ms: float = 0.0
     current_dir_deg: float = 0.0
 
+    # Wave decomposition (when available from CMEMS)
+    windwave_height_m: float = 0.0
+    windwave_period_s: float = 0.0
+    windwave_dir_deg: float = 0.0
+    swell_height_m: float = 0.0
+    swell_period_s: float = 0.0
+    swell_dir_deg: float = 0.0
+    has_decomposition: bool = False
+
 
 @dataclass
 class LegResult:

@@ -965,7 +965,8 @@ async def api_get_wave_field(
     # High-resolution ocean mask (0.05° ≈ 5.5km) via vectorized numpy
     mask_lats, mask_lons, ocean_mask = _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05)
 
-    return {
+    # Build response with combined data
+    response = {
         "parameter": "wave_height",
         "time": time.isoformat(),
         "bbox": {
@@ -989,8 +990,25 @@ async def api_get_wave_field(
             "min": 0,
             "max": 6,
             "colors": ["#00ff00", "#ffff00", "#ff8800", "#ff0000", "#800000"],
-        }
+        },
     }
+
+    # Include wave decomposition when available
+    has_decomp = wave_data.windwave_height is not None and wave_data.swell_height is not None
+    response["has_decomposition"] = has_decomp
+    if has_decomp:
+        response["windwave"] = {
+            "height": wave_data.windwave_height.tolist(),
+            "period": wave_data.windwave_period.tolist() if wave_data.windwave_period is not None else None,
+            "direction": wave_data.windwave_direction.tolist() if wave_data.windwave_direction is not None else None,
+        }
+        response["swell"] = {
+            "height": wave_data.swell_height.tolist(),
+            "period": wave_data.swell_period.tolist() if wave_data.swell_period is not None else None,
+            "direction": wave_data.swell_direction.tolist() if wave_data.swell_direction is not None else None,
+        }
+
+    return response
 
 
 @app.get("/api/weather/currents")

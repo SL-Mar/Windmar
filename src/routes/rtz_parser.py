@@ -26,7 +26,7 @@ except ImportError:
     warnings.warn(
         "defusedxml not installed! XML parsing is vulnerable to XXE attacks. "
         "Install with: pip install defusedxml",
-        SecurityWarning
+        UserWarning
     )
 
 logger = logging.getLogger(__name__)

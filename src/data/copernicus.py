@@ -40,9 +40,19 @@ class WeatherData:
     u_component: Optional[np.ndarray] = None
     v_component: Optional[np.ndarray] = None
 
-    # For wave data - additional fields
+    # For wave data - combined fields
     wave_period: Optional[np.ndarray] = None  # Peak wave period (s)
     wave_direction: Optional[np.ndarray] = None  # Mean wave direction (deg)
+
+    # Wave decomposition: wind-wave component
+    windwave_height: Optional[np.ndarray] = None  # VHM0_WW (m)
+    windwave_period: Optional[np.ndarray] = None  # VTM01_WW (s)
+    windwave_direction: Optional[np.ndarray] = None  # VMDR_WW (deg)
+
+    # Wave decomposition: primary swell component
+    swell_height: Optional[np.ndarray] = None  # VHM0_SW1 (m)
+    swell_period: Optional[np.ndarray] = None  # VTM01_SW1 (s)
+    swell_direction: Optional[np.ndarray] = None  # VMDR_SW1 (deg)
 
 
 @dataclass
@@ -58,6 +68,14 @@ class PointWeather:
     wave_dir_deg: float
     current_speed_ms: float = 0.0
     current_dir_deg: float = 0.0
+
+    # Wave decomposition
+    windwave_height_m: float = 0.0
+    windwave_period_s: float = 0.0
+    windwave_dir_deg: float = 0.0
+    swell_height_m: float = 0.0
+    swell_period_s: float = 0.0
+    swell_dir_deg: float = 0.0
 
 
 class CopernicusDataProvider:
@@ -280,7 +298,11 @@ class CopernicusDataProvider:
             try:
                 ds = copernicusmarine.open_dataset(
                     dataset_id=self.CMEMS_WAVE_DATASET,
-                    variables=["VHM0", "VTPK", "VMDR"],  # Hs, Peak period, Mean direction
+                    variables=[
+                        "VHM0", "VTPK", "VMDR",        # Combined: Hs, peak period, direction
+                        "VHM0_WW", "VTM01_WW", "VMDR_WW",  # Wind-wave component
+                        "VHM0_SW1", "VTM01_SW1", "VMDR_SW1",  # Primary swell component
+                    ],
                     minimum_longitude=lon_min,
                     maximum_longitude=lon_max,
                     minimum_latitude=lat_min,
@@ -329,6 +351,28 @@ class CopernicusDataProvider:
                     wave_dir = wave_dir[0]
                 logger.info("Extracted wave direction (VMDR) from CMEMS")
 
+            # Extract wind-wave decomposition (optional — graceful if missing)
+            def _extract_var(name):
+                if name in ds:
+                    v = ds[name].values
+                    if len(v.shape) == 3:
+                        v = v[0]
+                    return v
+                return None
+
+            ww_hs = _extract_var('VHM0_WW')
+            ww_tp = _extract_var('VTM01_WW')
+            ww_dir = _extract_var('VMDR_WW')
+            sw_hs = _extract_var('VHM0_SW1')
+            sw_tp = _extract_var('VTM01_SW1')
+            sw_dir = _extract_var('VMDR_SW1')
+
+            has_decomp = ww_hs is not None and sw_hs is not None
+            if has_decomp:
+                logger.info("Extracted wind-wave/swell decomposition from CMEMS")
+            else:
+                logger.info("Swell decomposition not available in this dataset")
+
             return WeatherData(
                 parameter="wave_height",
                 time=start_time,
@@ -338,6 +382,12 @@ class CopernicusDataProvider:
                 unit="m",
                 wave_period=tp,
                 wave_direction=wave_dir,
+                windwave_height=ww_hs,
+                windwave_period=ww_tp,
+                windwave_direction=ww_dir,
+                swell_height=sw_hs,
+                swell_period=sw_tp,
+                swell_direction=sw_dir,
             )
 
         except Exception as e:
@@ -650,7 +700,7 @@ class SyntheticDataProvider:
         resolution: float = 1.0,
         wind_data: Optional[WeatherData] = None,
     ) -> WeatherData:
-        """Generate synthetic wave field based on wind."""
+        """Generate synthetic wave field with wind-wave/swell decomposition."""
         time = datetime.utcnow()
 
         lats = np.arange(lat_min, lat_max + resolution, resolution)
@@ -658,14 +708,40 @@ class SyntheticDataProvider:
 
         lon_grid, lat_grid = np.meshgrid(lons, lats)
 
+        # Wind-wave component: driven by local wind
         if wind_data is not None and wind_data.values is not None:
             wind_speed = wind_data.values
-            wave_height = 0.15 * wind_speed + np.random.randn(*wind_speed.shape) * 0.3
+            ww_height = 0.12 * wind_speed + np.random.randn(*wind_speed.shape) * 0.2
+            # Wind-wave direction follows wind direction
+            if wind_data.u_component is not None and wind_data.v_component is not None:
+                ww_dir = np.degrees(np.arctan2(-wind_data.u_component, -wind_data.v_component)) % 360
+            else:
+                ww_dir = np.full_like(ww_height, 270.0)
         else:
-            wave_height = 1.5 + 1.0 * np.sin(np.radians(lat_grid * 3))
-            wave_height += np.random.randn(*lat_grid.shape) * 0.2
+            ww_height = 0.8 + 0.5 * np.sin(np.radians(lat_grid * 3))
+            ww_dir = np.full_like(ww_height, 270.0)
 
-        wave_height = np.maximum(wave_height, 0.3)
+        ww_height = np.maximum(ww_height, 0.2)
+        ww_period = 3.0 + 0.8 * ww_height  # Short-period wind sea
+
+        # Swell component: long-period waves from distant storms
+        # Swell typically comes from a consistent direction, independent of local wind
+        swell_base = 1.0 + 0.8 * np.sin(np.radians(lat_grid * 2 + 30))
+        sw_height = np.maximum(swell_base + np.random.randn(*lat_grid.shape) * 0.15, 0.3)
+        sw_period = 10.0 + 2.0 * sw_height  # Long-period swell
+        sw_dir = np.full_like(sw_height, 300.0) + np.random.randn(*lat_grid.shape) * 5  # NW swell
+
+        # Combined sea state (RSS of components)
+        wave_height = np.sqrt(ww_height**2 + sw_height**2)
+        # Combined period: energy-weighted
+        total_energy = ww_height**2 + sw_height**2
+        wave_period = np.where(
+            total_energy > 0,
+            (ww_height**2 * ww_period + sw_height**2 * sw_period) / total_energy,
+            8.0,
+        )
+        # Combined direction: dominant component
+        wave_dir = np.where(sw_height > ww_height, sw_dir, ww_dir)
 
         return WeatherData(
             parameter="wave_height",
@@ -674,6 +750,14 @@ class SyntheticDataProvider:
             lons=lons,
             values=wave_height,
             unit="m",
+            wave_period=wave_period,
+            wave_direction=wave_dir % 360,
+            windwave_height=ww_height,
+            windwave_period=ww_period,
+            windwave_direction=ww_dir % 360,
+            swell_height=sw_height,
+            swell_period=sw_period,
+            swell_direction=sw_dir % 360,
         )
 
 

@@ -288,6 +288,81 @@ class SeakeepingModel:
             encounter_frequency_rad=omega_e,
         )
 
+    def calculate_motions_decomposed(
+        self,
+        windwave_height_m: float,
+        windwave_period_s: float,
+        windwave_dir_deg: float,
+        swell_height_m: float,
+        swell_period_s: float,
+        swell_dir_deg: float,
+        heading_deg: float,
+        speed_kts: float,
+        is_laden: bool,
+    ) -> MotionResponse:
+        """
+        Calculate motions from separate wind-wave and swell systems.
+
+        Computes response to each system independently, then combines
+        using spectral superposition (RSS for amplitudes, worst-case
+        for risk indicators). This is physically more accurate than
+        using a single combined sea state.
+
+        Args:
+            windwave_height_m: Wind-wave significant height (m)
+            windwave_period_s: Wind-wave mean period (s)
+            windwave_dir_deg: Wind-wave direction (degrees, from)
+            swell_height_m: Primary swell height (m)
+            swell_period_s: Primary swell period (s)
+            swell_dir_deg: Primary swell direction (degrees, from)
+            heading_deg: Ship heading (degrees)
+            speed_kts: Ship speed (knots)
+            is_laden: Loading condition
+
+        Returns:
+            MotionResponse with combined motion amplitudes
+        """
+        # Calculate response to each wave system
+        ww_response = self.calculate_motions(
+            windwave_height_m, windwave_period_s, windwave_dir_deg,
+            heading_deg, speed_kts, is_laden
+        )
+        sw_response = self.calculate_motions(
+            swell_height_m, swell_period_s, swell_dir_deg,
+            heading_deg, speed_kts, is_laden
+        )
+
+        # Combine using RSS (root sum of squares) for motion amplitudes.
+        # This approximates spectral superposition of independent systems.
+        combined_roll = math.sqrt(ww_response.roll_amplitude_deg**2 + sw_response.roll_amplitude_deg**2)
+        combined_pitch = math.sqrt(ww_response.pitch_amplitude_deg**2 + sw_response.pitch_amplitude_deg**2)
+        combined_heave = math.sqrt(ww_response.heave_accel_ms2**2 + sw_response.heave_accel_ms2**2)
+        combined_bow = math.sqrt(ww_response.bow_accel_ms2**2 + sw_response.bow_accel_ms2**2)
+        combined_bridge = math.sqrt(ww_response.bridge_accel_ms2**2 + sw_response.bridge_accel_ms2**2)
+
+        # For risk indicators, take worst case
+        combined_slam = max(ww_response.slamming_probability, sw_response.slamming_probability)
+        combined_greenwater = max(ww_response.green_water_probability, sw_response.green_water_probability)
+        combined_param_roll = max(ww_response.parametric_roll_risk, sw_response.parametric_roll_risk)
+
+        # Use the dominant system's encounter values (the one with larger roll)
+        dominant = sw_response if sw_response.roll_amplitude_deg > ww_response.roll_amplitude_deg else ww_response
+
+        return MotionResponse(
+            roll_amplitude_deg=min(combined_roll, 45.0),
+            roll_period_s=dominant.roll_period_s,
+            pitch_amplitude_deg=min(combined_pitch, 20.0),
+            pitch_period_s=dominant.pitch_period_s,
+            heave_accel_ms2=combined_heave,
+            bow_accel_ms2=combined_bow,
+            bridge_accel_ms2=combined_bridge,
+            slamming_probability=combined_slam,
+            green_water_probability=combined_greenwater,
+            parametric_roll_risk=combined_param_roll,
+            encounter_period_s=dominant.encounter_period_s,
+            encounter_frequency_rad=dominant.encounter_frequency_rad,
+        )
+
     def _calculate_roll(
         self,
         wave_height_m: float,
@@ -567,26 +642,51 @@ class SafetyConstraints:
         heading_deg: float,
         speed_kts: float,
         is_laden: bool,
+        windwave_height_m: float = 0.0,
+        windwave_period_s: float = 0.0,
+        windwave_dir_deg: float = 0.0,
+        swell_height_m: float = 0.0,
+        swell_period_s: float = 0.0,
+        swell_dir_deg: float = 0.0,
+        has_decomposition: bool = False,
     ) -> SafetyAssessment:
         """
         Perform full safety assessment for a voyage leg.
 
+        When wave decomposition is available, uses separate wind-wave
+        and swell systems for more accurate motion prediction. Falls
+        back to combined sea state when decomposition is not available.
+
         Args:
-            wave_height_m: Significant wave height (m)
-            wave_period_s: Peak wave period (s)
-            wave_dir_deg: Wave direction (degrees)
+            wave_height_m: Significant wave height (m) — combined
+            wave_period_s: Peak wave period (s) — combined
+            wave_dir_deg: Wave direction (degrees) — combined
             heading_deg: Ship heading (degrees)
             speed_kts: Ship speed (knots)
             is_laden: Loading condition
+            windwave_height_m: Wind-wave height (m) — if decomposed
+            windwave_period_s: Wind-wave period (s) — if decomposed
+            windwave_dir_deg: Wind-wave direction (deg) — if decomposed
+            swell_height_m: Swell height (m) — if decomposed
+            swell_period_s: Swell period (s) — if decomposed
+            swell_dir_deg: Swell direction (deg) — if decomposed
+            has_decomposition: Whether decomposed data is available
 
         Returns:
             SafetyAssessment with detailed evaluation
         """
-        # Calculate motions
-        motions = self.seakeeping.calculate_motions(
-            wave_height_m, wave_period_s, wave_dir_deg,
-            heading_deg, speed_kts, is_laden
-        )
+        # Calculate motions — use decomposed data when available
+        if has_decomposition and windwave_height_m > 0 and swell_height_m > 0:
+            motions = self.seakeeping.calculate_motions_decomposed(
+                windwave_height_m, windwave_period_s, windwave_dir_deg,
+                swell_height_m, swell_period_s, swell_dir_deg,
+                heading_deg, speed_kts, is_laden,
+            )
+        else:
+            motions = self.seakeeping.calculate_motions(
+                wave_height_m, wave_period_s, wave_dir_deg,
+                heading_deg, speed_kts, is_laden,
+            )
 
         warnings = []
 
