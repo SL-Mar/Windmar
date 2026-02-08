@@ -2020,14 +2020,35 @@ async def monte_carlo_simulation(request: MonteCarloRequest):
     wps = [(wp.lat, wp.lon) for wp in request.waypoints]
     route = create_route_from_waypoints(wps, "MC Simulation Route")
 
+    # Pre-fetch wind grid for the route bbox so MC wind lookups are instant
+    # (avoids per-leg unified provider calls that trigger live CMEMS/GFS downloads)
+    mc_weather_fn = weather_provider  # default fallback
+    try:
+        lats = [wp.lat for wp in request.waypoints]
+        lons = [wp.lon for wp in request.waypoints]
+        margin = 2.0
+        bbox = (min(lats) - margin, max(lats) + margin,
+                min(lons) - margin, max(lons) + margin)
+        wind_data = get_wind_field(*bbox, 0.5, departure)
+        wave_data = get_wave_field(*bbox, 0.5, wind_data)
+        current_data = get_current_field(bbox[0], bbox[1], bbox[2], bbox[3])
+        if wind_data and wave_data and current_data:
+            from src.optimization.grid_weather_provider import GridWeatherProvider
+            grid_wx = GridWeatherProvider(wind_data, wave_data, current_data)
+            mc_weather_fn = grid_wx.get_weather
+            logger.info("MC: Pre-fetched route weather grid for fast wind lookups")
+    except Exception as e:
+        logger.warning(f"MC: Failed to pre-fetch route grid, using default provider: {e}")
+
     def _run():
         return monte_carlo_sim.run(
             route=route,
             calm_speed_kts=request.calm_speed_kts,
             is_laden=request.is_laden,
             departure_time=departure,
-            weather_provider=weather_provider,
+            weather_provider=mc_weather_fn,
             n_simulations=request.n_simulations,
+            db_weather=db_weather,
         )
 
     try:

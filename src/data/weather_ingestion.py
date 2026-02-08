@@ -135,73 +135,155 @@ class WeatherIngestionService:
             conn.close()
 
     def ingest_waves(self):
-        """Fetch CMEMS wave analysis (Hs, Tp, Dir)."""
+        """Fetch CMEMS wave forecast (Hs, Tp, Dir) for all available forecast hours.
+
+        Tries fetch_wave_forecast() first (0-120h, 3-hourly = up to 41 timesteps).
+        Falls back to fetch_wave_data() (single snapshot at h=0) if forecast
+        fetch is unavailable.
+        """
         source = "cmems_wave"
         run_time = datetime.now(timezone.utc)
+
+        # Try multi-timestep forecast first
+        forecast_frames = None
+        if hasattr(self.copernicus_provider, "fetch_wave_forecast"):
+            try:
+                logger.info("Attempting CMEMS wave forecast download (0-120h)...")
+                forecast_frames = self.copernicus_provider.fetch_wave_forecast(
+                    self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
+                )
+            except Exception as e:
+                logger.warning(f"Wave forecast fetch failed, falling back to snapshot: {e}")
+
         conn = self._get_conn()
         try:
             cur = conn.cursor()
-            cur.execute(
-                """INSERT INTO weather_forecast_runs
-                   (source, run_time, status, grid_resolution,
-                    lat_min, lat_max, lon_min, lon_max, forecast_hours)
-                   VALUES (%s, %s, 'ingesting', %s, %s, %s, %s, %s, %s)
-                   ON CONFLICT (source, run_time) DO UPDATE
-                   SET status = 'ingesting', ingested_at = NOW()
-                   RETURNING id""",
-                (source, run_time, self.GRID_RESOLUTION,
-                 self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
-                 [0]),
-            )
-            run_id = cur.fetchone()[0]
-            conn.commit()
 
-            wave_data = self.copernicus_provider.fetch_wave_data(
-                self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
-            )
-            if wave_data is None:
+            if forecast_frames:
+                # Multi-timestep path
+                available_hours = sorted(forecast_frames.keys())
                 cur.execute(
-                    "UPDATE weather_forecast_runs SET status = 'failed' WHERE id = %s",
+                    """INSERT INTO weather_forecast_runs
+                       (source, run_time, status, grid_resolution,
+                        lat_min, lat_max, lon_min, lon_max, forecast_hours)
+                       VALUES (%s, %s, 'ingesting', %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (source, run_time) DO UPDATE
+                       SET status = 'ingesting', ingested_at = NOW()
+                       RETURNING id""",
+                    (source, run_time, self.GRID_RESOLUTION,
+                     self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
+                     available_hours),
+                )
+                run_id = cur.fetchone()[0]
+                conn.commit()
+
+                ingested_hours = []
+                for fh in available_hours:
+                    try:
+                        wd = forecast_frames[fh]
+                        lats_blob = self._compress(np.asarray(wd.lats))
+                        lons_blob = self._compress(np.asarray(wd.lons))
+                        rows = len(wd.lats)
+                        cols = len(wd.lons)
+
+                        for param, arr in [
+                            ("wave_hs", wd.values),
+                            ("wave_tp", wd.wave_period),
+                            ("wave_dir", wd.wave_direction),
+                        ]:
+                            if arr is None:
+                                continue
+                            cur.execute(
+                                """INSERT INTO weather_grid_data
+                                   (run_id, forecast_hour, parameter, lats, lons, data, shape_rows, shape_cols)
+                                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                   ON CONFLICT (run_id, forecast_hour, parameter)
+                                   DO UPDATE SET data = EXCLUDED.data,
+                                                lats = EXCLUDED.lats,
+                                                lons = EXCLUDED.lons,
+                                                shape_rows = EXCLUDED.shape_rows,
+                                                shape_cols = EXCLUDED.shape_cols""",
+                                (run_id, fh, param, lats_blob, lons_blob,
+                                 self._compress(np.asarray(arr)), rows, cols),
+                            )
+                        ingested_hours.append(fh)
+                        conn.commit()
+                        logger.debug(f"Ingested CMEMS wave f{fh:03d}")
+                    except Exception as e:
+                        logger.error(f"Failed to ingest wave f{fh:03d}: {e}")
+                        conn.rollback()
+
+                status = "complete" if ingested_hours else "failed"
+                cur.execute(
+                    "UPDATE weather_forecast_runs SET status = %s, forecast_hours = %s WHERE id = %s",
+                    (status, ingested_hours, run_id),
+                )
+                conn.commit()
+                logger.info(
+                    f"CMEMS wave forecast ingestion {status}: "
+                    f"{len(ingested_hours)}/{len(available_hours)} hours"
+                )
+            else:
+                # Single-snapshot fallback (hour 0 only)
+                cur.execute(
+                    """INSERT INTO weather_forecast_runs
+                       (source, run_time, status, grid_resolution,
+                        lat_min, lat_max, lon_min, lon_max, forecast_hours)
+                       VALUES (%s, %s, 'ingesting', %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (source, run_time) DO UPDATE
+                       SET status = 'ingesting', ingested_at = NOW()
+                       RETURNING id""",
+                    (source, run_time, self.GRID_RESOLUTION,
+                     self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
+                     [0]),
+                )
+                run_id = cur.fetchone()[0]
+                conn.commit()
+
+                wave_data = self.copernicus_provider.fetch_wave_data(
+                    self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
+                )
+                if wave_data is None:
+                    cur.execute(
+                        "UPDATE weather_forecast_runs SET status = 'failed' WHERE id = %s",
+                        (run_id,),
+                    )
+                    conn.commit()
+                    logger.warning("CMEMS wave fetch returned None")
+                    return
+
+                lats_blob = self._compress(np.asarray(wave_data.lats))
+                lons_blob = self._compress(np.asarray(wave_data.lons))
+                rows = len(wave_data.lats)
+                cols = len(wave_data.lons)
+
+                for param, arr in [
+                    ("wave_hs", wave_data.values),
+                    ("wave_tp", wave_data.wave_period),
+                    ("wave_dir", wave_data.wave_direction),
+                ]:
+                    if arr is None:
+                        continue
+                    cur.execute(
+                        """INSERT INTO weather_grid_data
+                           (run_id, forecast_hour, parameter, lats, lons, data, shape_rows, shape_cols)
+                           VALUES (%s, 0, %s, %s, %s, %s, %s, %s)
+                           ON CONFLICT (run_id, forecast_hour, parameter)
+                           DO UPDATE SET data = EXCLUDED.data,
+                                        lats = EXCLUDED.lats,
+                                        lons = EXCLUDED.lons,
+                                        shape_rows = EXCLUDED.shape_rows,
+                                        shape_cols = EXCLUDED.shape_cols""",
+                        (run_id, param, lats_blob, lons_blob,
+                         self._compress(np.asarray(arr)), rows, cols),
+                    )
+
+                cur.execute(
+                    "UPDATE weather_forecast_runs SET status = 'complete' WHERE id = %s",
                     (run_id,),
                 )
                 conn.commit()
-                logger.warning("CMEMS wave fetch returned None")
-                return
-
-            lats_blob = self._compress(np.asarray(wave_data.lats))
-            lons_blob = self._compress(np.asarray(wave_data.lons))
-            rows = len(wave_data.lats)
-            cols = len(wave_data.lons)
-
-            # Store wave parameters
-            params = [
-                ("wave_hs", wave_data.values),
-                ("wave_tp", wave_data.wave_period),
-                ("wave_dir", wave_data.wave_direction),
-            ]
-            for param, arr in params:
-                if arr is None:
-                    continue
-                cur.execute(
-                    """INSERT INTO weather_grid_data
-                       (run_id, forecast_hour, parameter, lats, lons, data, shape_rows, shape_cols)
-                       VALUES (%s, 0, %s, %s, %s, %s, %s, %s)
-                       ON CONFLICT (run_id, forecast_hour, parameter)
-                       DO UPDATE SET data = EXCLUDED.data,
-                                    lats = EXCLUDED.lats,
-                                    lons = EXCLUDED.lons,
-                                    shape_rows = EXCLUDED.shape_rows,
-                                    shape_cols = EXCLUDED.shape_cols""",
-                    (run_id, param, lats_blob, lons_blob,
-                     self._compress(np.asarray(arr)), rows, cols),
-                )
-
-            cur.execute(
-                "UPDATE weather_forecast_runs SET status = 'complete' WHERE id = %s",
-                (run_id,),
-            )
-            conn.commit()
-            logger.info("CMEMS wave ingestion complete")
+                logger.info("CMEMS wave snapshot ingestion complete (forecast unavailable)")
 
         except Exception as e:
             logger.error(f"Wave ingestion failed: {e}")

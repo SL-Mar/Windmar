@@ -1,23 +1,38 @@
 """
-Monte Carlo voyage simulation.
+Monte Carlo voyage simulation with temporal weather slices.
 
 Runs N voyage calculations with perturbed weather to produce
 P10/P50/P90 confidence intervals for ETA, fuel, and voyage time.
 
-Perturbation strategy:
-- Wind speed: log-normal multiplicative factor, sigma ~0.35
-- Wave height: correlated with wind perturbation (Hs ~ wind^1.5)
-- Current: small independent perturbation (sigma ~0.15)
-- Wind/wave directions: small angular perturbation (sigma ~15 deg)
+Two modes:
+1. **Temporal** (preferred): Divides the voyage into time slices, fetches
+   time-varying weather from pre-ingested DB grids (wave forecast hours 0-120h),
+   and applies temporally correlated perturbations via Cholesky decomposition
+   of an exponential correlation matrix.
 
-Performance: Base weather is fetched once for each leg midpoint,
-then all N simulations use the cached values with perturbation.
+2. **Legacy fallback**: Single weather sample per leg midpoint with uniform
+   perturbation (same random factor for all legs). Used when DB weather
+   is unavailable.
+
+Perturbation model:
+- Exponential temporal correlation: cov(i,j) = exp(-|ti-tj| / tau)
+  where tau = 0.3 × voyage duration (~1.5 days for a 5-day voyage)
+- Wind speed: log-normal, sigma=0.35, mean-corrected to E[factor]=1
+- Wave height: 70% correlated with wind + 30% independent, sigma=0.20
+- Current: independent correlated process, sigma=0.15
+- Directions: Gaussian angular offsets, sigma=15 deg, temporally correlated
+
+References:
+- Dickson et al. (2019), "Uncertainty in marine weather routing", arXiv:1901.03840
+- Aijjou et al. (2021), "A Comprehensive Approach to Account for Weather
+  Uncertainties in Ship Route Optimization", JMSE 9(12):1434
 """
 
 import logging
-import time
+import math
+import time as time_mod
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -54,21 +69,22 @@ class MonteCarloResult:
 
 class MonteCarloSimulator:
     """
-    Run Monte Carlo voyage simulations with perturbed weather.
+    Run Monte Carlo voyage simulations with temporally correlated
+    perturbed weather.
 
-    For each simulation run:
-    1. Generate perturbation factors from climatological variability
-    2. Create a perturbed weather provider that scales cached base weather
-    3. Run VoyageCalculator.calculate_voyage()
-    4. Collect ETA, fuel, and time
-
-    Finally compute P10/P50/P90 percentiles.
+    When db_weather is provided (DbWeatherProvider with multi-timestep
+    wave forecast), uses time-varying base weather along the route.
+    Otherwise falls back to the legacy single-snapshot approach.
     """
 
-    def __init__(
-        self,
-        voyage_calculator: VoyageCalculator,
-    ):
+    # Perturbation parameters
+    SIGMA_WIND = 0.35       # log-normal sigma for wind speed
+    SIGMA_WAVE = 0.20       # log-normal sigma for wave height
+    SIGMA_CURRENT = 0.15    # log-normal sigma for current speed
+    SIGMA_DIR = 15.0        # degrees, Gaussian offset for directions
+    CORR_TAU = 0.3          # correlation length as fraction of voyage duration
+
+    def __init__(self, voyage_calculator: VoyageCalculator):
         self.voyage_calculator = voyage_calculator
 
     def run(
@@ -79,57 +95,63 @@ class MonteCarloSimulator:
         departure_time: datetime,
         weather_provider: Optional[Callable] = None,
         n_simulations: int = 100,
+        db_weather=None,
     ) -> MonteCarloResult:
-        start_time = time.time()
+        """Run Monte Carlo simulation.
 
-        # Phase 1: Pre-fetch base weather for all leg midpoints (single pass)
-        base_weather: Dict[int, LegWeather] = {}
-        if weather_provider:
-            current_time = departure_time
-            for i, leg in enumerate(route.legs):
-                mid_lat = (leg.from_wp.lat + leg.to_wp.lat) / 2
-                mid_lon = (leg.from_wp.lon + leg.to_wp.lon) / 2
-                leg_mid_time = current_time + timedelta(
-                    hours=leg.distance_nm / calm_speed_kts / 2
-                )
-                try:
-                    base_weather[i] = weather_provider(mid_lat, mid_lon, leg_mid_time)
-                except Exception as e:
-                    logger.warning(f"MC base weather fetch failed for leg {i}: {e}")
-                    base_weather[i] = LegWeather()
-                # Advance time estimate
-                current_time += timedelta(hours=leg.distance_nm / calm_speed_kts)
+        Args:
+            route: Voyage route with waypoints.
+            calm_speed_kts: Calm-water speed assumption (knots).
+            is_laden: Laden or ballast condition.
+            departure_time: Voyage departure time.
+            weather_provider: Callable (lat, lon, time) -> LegWeather.
+            n_simulations: Number of simulation runs.
+            db_weather: DbWeatherProvider for multi-timestep wave grids.
 
-        logger.info(
-            f"MC: Pre-fetched base weather for {len(base_weather)} legs "
-            f"in {(time.time() - start_time) * 1000:.0f}ms"
+        Returns:
+            MonteCarloResult with P10/P50/P90 percentiles.
+        """
+        t0 = time_mod.time()
+
+        # Compute route timeline (positions along route at even time intervals)
+        total_dist = sum(leg.distance_nm for leg in route.legs)
+        total_time_h = total_dist / max(calm_speed_kts, 0.1)
+        n_slices = min(100, max(20, int(total_time_h / 1.2)))  # ~1 slice per 1.2h
+        slices = self._compute_route_timeline(
+            route, calm_speed_kts, departure_time, n_slices
         )
 
-        # Phase 2: Run N simulations with perturbations on cached weather
-        rng = np.random.default_rng()
+        # Pre-fetch base weather for all time slices
+        base_weather = self._prefetch_base_weather(
+            slices, route, weather_provider, db_weather
+        )
 
+        prefetch_ms = (time_mod.time() - t0) * 1000
+        logger.info(
+            f"MC: Pre-fetched {len(base_weather)} time slices in {prefetch_ms:.0f}ms "
+            f"(voyage: {total_time_h:.0f}h, {total_dist:.0f}nm)"
+        )
+
+        # Build correlation matrix (Cholesky factor)
+        L = self._build_correlation_cholesky(n_slices, self.CORR_TAU)
+
+        # Run N simulations
+        rng = np.random.default_rng()
         total_times: List[float] = []
         total_fuels: List[float] = []
         arrival_times: List[datetime] = []
 
-        for i in range(n_simulations):
-            wind_factor = rng.lognormal(mean=0.0, sigma=0.35)
-            wave_corr = wind_factor ** 1.5
-            wave_factor = wave_corr * rng.lognormal(mean=0.0, sigma=0.15)
-            current_factor = rng.lognormal(mean=0.0, sigma=0.15)
-            dir_offset = rng.normal(0.0, 15.0)
+        for sim_idx in range(n_simulations):
+            # Generate temporally correlated perturbation factors
+            wind_factors, wave_factors, current_factors, dir_offsets = (
+                self._generate_correlated_perturbations(rng, L)
+            )
 
-            if base_weather:
-                perturbed = self._make_cached_perturbed_provider(
-                    base_weather,
-                    route,
-                    wind_factor,
-                    wave_factor,
-                    current_factor,
-                    dir_offset,
-                )
-            else:
-                perturbed = None
+            # Create perturbed weather provider
+            perturbed = self._make_temporal_perturbed_provider(
+                base_weather, slices, route,
+                wind_factors, wave_factors, current_factors, dir_offsets,
+            )
 
             try:
                 result = self.voyage_calculator.calculate_voyage(
@@ -139,21 +161,20 @@ class MonteCarloSimulator:
                     departure_time=departure_time,
                     weather_provider=perturbed,
                 )
-
-                if result.total_time_hours > 0 and result.total_time_hours < 1e6:
+                if 0 < result.total_time_hours < 1e6:
                     total_times.append(result.total_time_hours)
                     total_fuels.append(result.total_fuel_mt)
                     arrival_times.append(result.arrival_time)
             except Exception as e:
-                logger.warning(f"MC simulation {i} failed: {e}")
+                logger.warning(f"MC simulation {sim_idx} failed: {e}")
                 continue
 
-        elapsed_ms = (time.time() - start_time) * 1000
+        elapsed_ms = (time_mod.time() - t0) * 1000
 
         if len(total_times) < 3:
             raise ValueError(
-                f"Only {len(total_times)} simulations succeeded out of {n_simulations}. "
-                "Cannot compute meaningful percentiles."
+                f"Only {len(total_times)} simulations succeeded out of "
+                f"{n_simulations}. Cannot compute meaningful percentiles."
             )
 
         # Compute percentiles
@@ -163,8 +184,8 @@ class MonteCarloSimulator:
         time_p10, time_p50, time_p90 = np.percentile(time_arr, [10, 50, 90])
         fuel_p10, fuel_p50, fuel_p90 = np.percentile(fuel_arr, [10, 50, 90])
 
-        arrival_timestamps = np.array([dt.timestamp() for dt in arrival_times])
-        eta_p10_ts, eta_p50_ts, eta_p90_ts = np.percentile(arrival_timestamps, [10, 50, 90])
+        arrival_ts = np.array([dt.timestamp() for dt in arrival_times])
+        eta_p10_ts, eta_p50_ts, eta_p90_ts = np.percentile(arrival_ts, [10, 50, 90])
 
         logger.info(
             f"MC: {len(total_times)}/{n_simulations} succeeded in {elapsed_ms:.0f}ms. "
@@ -173,9 +194,9 @@ class MonteCarloSimulator:
 
         return MonteCarloResult(
             n_simulations=len(total_times),
-            eta_p10=datetime.utcfromtimestamp(eta_p10_ts).isoformat() + 'Z',
-            eta_p50=datetime.utcfromtimestamp(eta_p50_ts).isoformat() + 'Z',
-            eta_p90=datetime.utcfromtimestamp(eta_p90_ts).isoformat() + 'Z',
+            eta_p10=datetime.utcfromtimestamp(eta_p10_ts).isoformat() + "Z",
+            eta_p50=datetime.utcfromtimestamp(eta_p50_ts).isoformat() + "Z",
+            eta_p90=datetime.utcfromtimestamp(eta_p90_ts).isoformat() + "Z",
             fuel_p10=round(float(fuel_p10), 2),
             fuel_p50=round(float(fuel_p50), 2),
             fuel_p90=round(float(fuel_p90), 2),
@@ -185,52 +206,356 @@ class MonteCarloSimulator:
             computation_time_ms=round(elapsed_ms, 1),
         )
 
-    def _make_cached_perturbed_provider(
-        self,
-        base_weather: Dict[int, LegWeather],
-        route: Route,
-        wind_factor: float,
-        wave_factor: float,
-        current_factor: float,
-        dir_offset: float,
-    ) -> Callable:
-        """Create a weather provider that perturbs cached base weather.
+    # ------------------------------------------------------------------
+    # Route timeline
+    # ------------------------------------------------------------------
 
-        The VoyageCalculator queries weather at leg midpoints. We match
-        the query point to the nearest leg index and apply perturbation
-        to the cached base weather for that leg.
+    def _compute_route_timeline(
+        self,
+        route: Route,
+        speed_kts: float,
+        departure: datetime,
+        n_slices: int,
+    ) -> List[Tuple[datetime, float, float]]:
+        """Compute (time, lat, lon) for n_slices evenly spaced along the route.
+
+        Uses linear interpolation along rhumb-line legs.
         """
-        # Build lookup: list of (mid_lat, mid_lon) for each leg
+        # Build cumulative distance table
+        waypoints = []  # (cum_dist, lat, lon)
+        cum = 0.0
+        for leg in route.legs:
+            waypoints.append((cum, leg.from_wp.lat, leg.from_wp.lon))
+            cum += leg.distance_nm
+        waypoints.append((cum, route.legs[-1].to_wp.lat, route.legs[-1].to_wp.lon))
+
+        total_dist = cum
+        total_time_h = total_dist / max(speed_kts, 0.1)
+
+        slices = []
+        for i in range(n_slices):
+            frac = i / (n_slices - 1) if n_slices > 1 else 0.0
+            dist = frac * total_dist
+            t = departure + timedelta(hours=frac * total_time_h)
+            lat, lon = self._interpolate_position(waypoints, dist)
+            slices.append((t, lat, lon))
+
+        return slices
+
+    @staticmethod
+    def _interpolate_position(
+        waypoints: List[Tuple[float, float, float]],
+        target_dist: float,
+    ) -> Tuple[float, float]:
+        """Linear interpolation of lat/lon at a given cumulative distance."""
+        for i in range(len(waypoints) - 1):
+            d0, lat0, lon0 = waypoints[i]
+            d1, lat1, lon1 = waypoints[i + 1]
+            if target_dist <= d1 or i == len(waypoints) - 2:
+                seg_len = d1 - d0
+                if seg_len <= 0:
+                    return lat0, lon0
+                frac = max(0.0, min(1.0, (target_dist - d0) / seg_len))
+                return lat0 + frac * (lat1 - lat0), lon0 + frac * (lon1 - lon0)
+        return waypoints[-1][1], waypoints[-1][2]
+
+    # ------------------------------------------------------------------
+    # Weather pre-fetch
+    # ------------------------------------------------------------------
+
+    def _prefetch_base_weather(
+        self,
+        slices: List[Tuple[datetime, float, float]],
+        route: Route,
+        weather_provider: Optional[Callable],
+        db_weather,
+    ) -> List[LegWeather]:
+        """Pre-fetch base weather for all time slices.
+
+        Uses DB wave grids (multi-timestep) + weather_provider for wind.
+        Falls back to weather_provider-only if DB is unavailable.
+        """
+        if db_weather is not None:
+            db_result = self._prefetch_from_db(slices, route, db_weather, weather_provider)
+            if db_result is not None:
+                return db_result
+
+        # Fallback: use weather_provider at each slice
+        if weather_provider:
+            return self._prefetch_from_provider(slices, weather_provider)
+
+        return [LegWeather() for _ in slices]
+
+    def _prefetch_from_db(
+        self,
+        slices: List[Tuple[datetime, float, float]],
+        route: Route,
+        db_weather,
+        wind_provider: Optional[Callable],
+    ) -> Optional[List[LegWeather]]:
+        """Pre-fetch from DB (wave/current grids) + wind_provider (GFS).
+
+        Returns list of LegWeather per slice, or None if DB has no data.
+        """
+        from src.optimization.grid_weather_provider import GridWeatherProvider
+
+        # Route bounding box with margin
+        all_lats = [s[1] for s in slices]
+        all_lons = [s[2] for s in slices]
+        margin = 2.0
+        bbox = (
+            min(all_lats) - margin, max(all_lats) + margin,
+            min(all_lons) - margin, max(all_lons) + margin,
+        )
+
+        # Load wave grids for all needed forecast hours
+        times = [s[0] for s in slices]
+        wave_grids = db_weather.get_wave_grids_for_timeline(*bbox, times)
+        if not wave_grids:
+            logger.info("MC: No wave grids in DB, falling back to weather_provider")
+            return None
+
+        # Load current grid (single snapshot)
+        current_data = db_weather.get_current_from_db(*bbox)
+
+        # Determine which forecast hour each slice maps to
+        run_time, available_hours = db_weather.get_available_wave_hours()
+        if not available_hours:
+            return None
+        if run_time is not None and run_time.tzinfo is None:
+            run_time = run_time.replace(tzinfo=timezone.utc)
+
+        # Pre-fetch wind at leg midpoints via weather_provider (GFS, cached)
+        # Use total voyage time from slices to estimate speed
+        wind_at_legs: Dict[int, LegWeather] = {}
+        if wind_provider:
+            total_time_h = max(
+                1.0,
+                (slices[-1][0] - slices[0][0]).total_seconds() / 3600.0,
+            )
+            est_speed = route.total_distance_nm / total_time_h
+            leg_start_t = slices[0][0]
+            for i, leg in enumerate(route.legs):
+                mid_lat = (leg.from_wp.lat + leg.to_wp.lat) / 2
+                mid_lon = (leg.from_wp.lon + leg.to_wp.lon) / 2
+                leg_time_h = leg.distance_nm / max(est_speed, 1.0)
+                mid_t = leg_start_t + timedelta(hours=leg_time_h / 2)
+                try:
+                    wind_at_legs[i] = wind_provider(mid_lat, mid_lon, mid_t)
+                except Exception:
+                    wind_at_legs[i] = LegWeather()
+                leg_start_t += timedelta(hours=leg_time_h)
+
+        # Build leg midpoint lookup for wind interpolation
         leg_midpoints = []
         for leg in route.legs:
-            mid_lat = (leg.from_wp.lat + leg.to_wp.lat) / 2
-            mid_lon = (leg.from_wp.lon + leg.to_wp.lon) / 2
-            leg_midpoints.append((mid_lat, mid_lon))
+            leg_midpoints.append((
+                (leg.from_wp.lat + leg.to_wp.lat) / 2,
+                (leg.from_wp.lon + leg.to_wp.lon) / 2,
+            ))
+
+        # Build base weather for each time slice
+        result = []
+        for idx, (t, lat, lon) in enumerate(slices):
+            # Wave: bilinear interpolation from DB grid at nearest forecast hour
+            if t.tzinfo is None:
+                t_aware = t.replace(tzinfo=timezone.utc)
+            else:
+                t_aware = t
+            delta_h = (t_aware - run_time).total_seconds() / 3600.0
+            best_fh = min(wave_grids.keys(), key=lambda h: abs(h - delta_h))
+            lats_w, lons_w, hs_grid, tp_grid, dir_grid = wave_grids[best_fh]
+
+            wave_hs = GridWeatherProvider._interp(lat, lon, lats_w, lons_w, hs_grid)
+            wave_tp = 0.0
+            wave_dir = 0.0
+            if tp_grid is not None:
+                wave_tp = GridWeatherProvider._interp(lat, lon, lats_w, lons_w, tp_grid)
+            if dir_grid is not None:
+                wave_dir = GridWeatherProvider._interp(lat, lon, lats_w, lons_w, dir_grid)
+            if wave_tp <= 0 and wave_hs > 0:
+                wave_tp = 5.0 + wave_hs
+
+            # Current: bilinear interpolation from DB grid
+            current_speed = 0.0
+            current_dir = 0.0
+            if current_data is not None and current_data.u_component is not None:
+                cu = GridWeatherProvider._interp(
+                    lat, lon,
+                    np.asarray(current_data.lats), np.asarray(current_data.lons),
+                    np.asarray(current_data.u_component),
+                )
+                cv = GridWeatherProvider._interp(
+                    lat, lon,
+                    np.asarray(current_data.lats), np.asarray(current_data.lons),
+                    np.asarray(current_data.v_component),
+                )
+                current_speed = math.sqrt(cu * cu + cv * cv)
+                current_dir = (270.0 - math.degrees(math.atan2(cv, cu))) % 360.0
+
+            # Wind: interpolate from nearest leg midpoint
+            wind_speed = 0.0
+            wind_dir = 0.0
+            if wind_at_legs:
+                best_leg = 0
+                best_d = float("inf")
+                for li, (ml, mn) in enumerate(leg_midpoints):
+                    d = (lat - ml) ** 2 + (lon - mn) ** 2
+                    if d < best_d:
+                        best_d = d
+                        best_leg = li
+                w = wind_at_legs.get(best_leg, LegWeather())
+                wind_speed = w.wind_speed_ms
+                wind_dir = w.wind_dir_deg
+
+            result.append(LegWeather(
+                wind_speed_ms=wind_speed,
+                wind_dir_deg=wind_dir,
+                sig_wave_height_m=max(wave_hs, 0.0),
+                wave_period_s=max(wave_tp, 0.0),
+                wave_dir_deg=wave_dir,
+                current_speed_ms=current_speed,
+                current_dir_deg=current_dir,
+            ))
+
+        logger.info(
+            f"MC: DB pre-fetch complete — {len(wave_grids)} wave forecast hours, "
+            f"{len(result)} slices"
+        )
+        return result
+
+    def _prefetch_from_provider(
+        self,
+        slices: List[Tuple[datetime, float, float]],
+        weather_provider: Callable,
+    ) -> List[LegWeather]:
+        """Fallback: fetch weather at each slice position via the weather_provider."""
+        result = []
+        for t, lat, lon in slices:
+            try:
+                result.append(weather_provider(lat, lon, t))
+            except Exception as e:
+                logger.warning(f"MC weather fetch failed at ({lat:.1f}, {lon:.1f}): {e}")
+                result.append(LegWeather())
+        return result
+
+    # ------------------------------------------------------------------
+    # Correlation model
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_correlation_cholesky(n: int, tau: float) -> np.ndarray:
+        """Build Cholesky factor of an exponential correlation matrix.
+
+        cov(i, j) = exp(-|t_i - t_j| / tau)
+        where t is normalized to [0, 1] over the voyage duration.
+
+        Args:
+            n: Number of time slices.
+            tau: Correlation length as fraction of voyage duration.
+
+        Returns:
+            Lower-triangular Cholesky factor L such that L @ L^T = cov.
+        """
+        t = np.linspace(0.0, 1.0, n)
+        cov = np.exp(-np.abs(t[:, None] - t[None, :]) / max(tau, 0.01))
+        # Small diagonal regularization for numerical stability
+        cov += 1e-8 * np.eye(n)
+        return np.linalg.cholesky(cov)
+
+    def _generate_correlated_perturbations(
+        self,
+        rng: np.random.Generator,
+        L: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Generate temporally correlated perturbation factors.
+
+        Returns:
+            (wind_factors, wave_factors, current_factors, dir_offsets)
+            Each is an array of length n_slices.
+        """
+        n = L.shape[0]
+
+        # Correlated standard normals
+        z_wind = L @ rng.standard_normal(n)
+        z_wave_indep = L @ rng.standard_normal(n)
+        z_current = L @ rng.standard_normal(n)
+        z_dir = L @ rng.standard_normal(n)
+
+        # Wind speed: log-normal, E[factor] = 1.0
+        wind_factors = np.exp(
+            self.SIGMA_WIND * z_wind - 0.5 * self.SIGMA_WIND ** 2
+        )
+
+        # Wave height: 70% correlated with wind, 30% independent
+        z_wave = 0.7 * z_wind + np.sqrt(1 - 0.7 ** 2) * z_wave_indep
+        wave_factors = np.exp(
+            self.SIGMA_WAVE * z_wave - 0.5 * self.SIGMA_WAVE ** 2
+        )
+
+        # Current: independent correlated process
+        current_factors = np.exp(
+            self.SIGMA_CURRENT * z_current - 0.5 * self.SIGMA_CURRENT ** 2
+        )
+
+        # Direction offsets: Gaussian, temporally correlated
+        dir_offsets = self.SIGMA_DIR * z_dir
+
+        return wind_factors, wave_factors, current_factors, dir_offsets
+
+    # ------------------------------------------------------------------
+    # Perturbed weather provider
+    # ------------------------------------------------------------------
+
+    def _make_temporal_perturbed_provider(
+        self,
+        base_weather: List[LegWeather],
+        slices: List[Tuple[datetime, float, float]],
+        route: Route,
+        wind_factors: np.ndarray,
+        wave_factors: np.ndarray,
+        current_factors: np.ndarray,
+        dir_offsets: np.ndarray,
+    ) -> Callable:
+        """Create a weather provider with temporally varying perturbations.
+
+        The VoyageCalculator queries weather at leg midpoints. This provider
+        matches each query to the nearest time slice and applies that slice's
+        perturbation factors to the pre-fetched base weather.
+        """
+        # Pre-compute slice timestamps for fast lookup
+        slice_times = np.array([s[0].timestamp() for s in slices])
+        slice_lats = np.array([s[1] for s in slices])
+        slice_lons = np.array([s[2] for s in slices])
 
         def perturbed(lat: float, lon: float, t: datetime) -> LegWeather:
-            # Find nearest leg by midpoint distance
-            best_idx = 0
-            best_dist = float('inf')
-            for idx, (mlat, mlon) in enumerate(leg_midpoints):
-                d = (lat - mlat) ** 2 + (lon - mlon) ** 2
-                if d < best_dist:
-                    best_dist = d
-                    best_idx = idx
+            # Find nearest slice by time (primary) and distance (secondary)
+            t_ts = t.timestamp()
+            time_dist = np.abs(slice_times - t_ts)
+            # Among the 5 closest in time, pick the spatially nearest
+            k = min(5, len(slices))
+            candidates = np.argpartition(time_dist, k)[:k]
+            spatial_dist = (slice_lats[candidates] - lat) ** 2 + (slice_lons[candidates] - lon) ** 2
+            best = candidates[np.argmin(spatial_dist)]
 
-            base = base_weather.get(best_idx, LegWeather())
+            base = base_weather[best]
+            wf = float(wind_factors[best])
+            vf = float(wave_factors[best])
+            cf = float(current_factors[best])
+            do = float(dir_offsets[best])
 
             return LegWeather(
-                wind_speed_ms=base.wind_speed_ms * wind_factor,
-                wind_dir_deg=(base.wind_dir_deg + dir_offset) % 360,
-                sig_wave_height_m=base.sig_wave_height_m * wave_factor,
+                wind_speed_ms=base.wind_speed_ms * wf,
+                wind_dir_deg=(base.wind_dir_deg + do) % 360,
+                sig_wave_height_m=base.sig_wave_height_m * vf,
                 wave_period_s=base.wave_period_s,
-                wave_dir_deg=(base.wave_dir_deg + dir_offset) % 360,
-                current_speed_ms=base.current_speed_ms * current_factor,
+                wave_dir_deg=(base.wave_dir_deg + do) % 360,
+                current_speed_ms=base.current_speed_ms * cf,
                 current_dir_deg=base.current_dir_deg,
-                windwave_height_m=base.windwave_height_m * wave_factor,
+                windwave_height_m=base.windwave_height_m * vf,
                 windwave_period_s=base.windwave_period_s,
-                windwave_dir_deg=(base.windwave_dir_deg + dir_offset) % 360,
-                swell_height_m=base.swell_height_m * wave_factor,
+                windwave_dir_deg=(base.windwave_dir_deg + do) % 360,
+                swell_height_m=base.swell_height_m * vf,
                 swell_period_s=base.swell_period_s,
                 swell_dir_deg=base.swell_dir_deg,
                 has_decomposition=base.has_decomposition,

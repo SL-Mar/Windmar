@@ -47,17 +47,26 @@ class DbWeatherProvider:
         lat_max: float,
         lon_min: float,
         lon_max: float,
+        time: Optional[datetime] = None,
     ) -> Optional[WeatherData]:
-        """Load wave data from DB, cropped to bbox. Returns None if unavailable."""
+        """Load wave data from DB, cropped to bbox. Returns None if unavailable.
+
+        If time is given and multi-timestep wave forecast data exists,
+        selects the closest available forecast hour.
+        """
         run_id = self._find_latest_run("cmems_wave")
         if run_id is None:
             return None
 
+        forecast_hour = 0
+        if time is not None:
+            forecast_hour = self._best_forecast_hour(run_id, time)
+
         conn = self._get_conn()
         try:
-            hs = self._load_grid(conn, run_id, 0, "wave_hs")
-            tp = self._load_grid(conn, run_id, 0, "wave_tp")
-            wd = self._load_grid(conn, run_id, 0, "wave_dir")
+            hs = self._load_grid(conn, run_id, forecast_hour, "wave_hs")
+            tp = self._load_grid(conn, run_id, forecast_hour, "wave_tp")
+            wd = self._load_grid(conn, run_id, forecast_hour, "wave_dir")
 
             if hs is None:
                 return None
@@ -263,6 +272,123 @@ class DbWeatherProvider:
         lons_c = lons[lon_mask]
         data_c = data[np.ix_(lat_mask, lon_mask)]
         return lats_c, lons_c, data_c
+
+    def get_wave_grids_for_timeline(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        times: list,
+    ) -> dict:
+        """Load wave grids for all unique forecast hours needed by the given times.
+
+        Efficiently loads each grid once from DB, crops to bbox, and returns
+        a dict mapping forecast_hour → (lats, lons, hs_2d, tp_2d, dir_2d).
+
+        Used by Monte Carlo to pre-fetch multi-timestep wave data in one pass.
+        """
+        run_id = self._find_latest_run("cmems_wave")
+        if run_id is None:
+            return {}
+
+        conn = self._get_conn()
+        try:
+            # Get run_time and available forecast hours
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT r.run_time, array_agg(DISTINCT g.forecast_hour ORDER BY g.forecast_hour)
+                   FROM weather_forecast_runs r
+                   JOIN weather_grid_data g ON g.run_id = r.id
+                   WHERE r.id = %s AND g.parameter = 'wave_hs'
+                   GROUP BY r.run_time""",
+                (run_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return {}
+
+            run_time, available_hours = row
+            if not available_hours:
+                return {}
+
+            if run_time is not None and run_time.tzinfo is None:
+                run_time = run_time.replace(tzinfo=timezone.utc)
+
+            # Determine which forecast hours are needed
+            needed_hours = set()
+            for t in times:
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                delta_h = (t - run_time).total_seconds() / 3600.0
+                best = min(available_hours, key=lambda h: abs(h - delta_h))
+                needed_hours.add(best)
+
+            # Load each needed forecast hour's grids
+            grids = {}
+            for fh in sorted(needed_hours):
+                hs = self._load_grid(conn, run_id, fh, "wave_hs")
+                if hs is None:
+                    continue
+                tp = self._load_grid(conn, run_id, fh, "wave_tp")
+                wd = self._load_grid(conn, run_id, fh, "wave_dir")
+
+                lats, lons, hs_data = hs
+                lats_c, lons_c, hs_crop = self._crop_grid(
+                    lats, lons, hs_data, lat_min, lat_max, lon_min, lon_max
+                )
+
+                tp_crop = None
+                if tp is not None:
+                    _, _, tp_crop = self._crop_grid(
+                        tp[0], tp[1], tp[2], lat_min, lat_max, lon_min, lon_max
+                    )
+
+                wd_crop = None
+                if wd is not None:
+                    _, _, wd_crop = self._crop_grid(
+                        wd[0], wd[1], wd[2], lat_min, lat_max, lon_min, lon_max
+                    )
+
+                grids[fh] = (lats_c, lons_c, hs_crop, tp_crop, wd_crop)
+
+            logger.info(
+                f"Loaded wave grids for {len(grids)} forecast hours "
+                f"(available: {len(available_hours)}, needed: {len(needed_hours)})"
+            )
+            return grids
+
+        except Exception as e:
+            logger.error(f"Failed to load wave timeline grids: {e}")
+            return {}
+        finally:
+            conn.close()
+
+    def get_available_wave_hours(self) -> tuple:
+        """Return (run_time, [forecast_hours]) for the latest complete wave run."""
+        run_id = self._find_latest_run("cmems_wave")
+        if run_id is None:
+            return None, []
+
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT r.run_time, array_agg(DISTINCT g.forecast_hour ORDER BY g.forecast_hour)
+                   FROM weather_forecast_runs r
+                   JOIN weather_grid_data g ON g.run_id = r.id
+                   WHERE r.id = %s AND g.parameter = 'wave_hs'
+                   GROUP BY r.run_time""",
+                (run_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None, []
+            return row[0], row[1] or []
+        except Exception:
+            return None, []
+        finally:
+            conn.close()
 
     def has_data(self) -> bool:
         """Check if any complete weather data exists in the database."""
