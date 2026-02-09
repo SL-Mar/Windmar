@@ -97,6 +97,10 @@ def _apply_ocean_mask_velocity(u: np.ndarray, v: np.ndarray, lats: np.ndarray, l
         return u_masked, v_masked
     except ImportError:
         return u, v
+from src.compliance.cii import (
+    CIICalculator, VesselType as CIIVesselType, CIIRating, CIIResult,
+    CIIProjection, estimate_cii_from_route, annualize_voyage_cii
+)
 from src.data.regulatory_zones import (
     get_zone_checker, Zone, ZoneProperties, ZoneType, ZoneInteraction
 )
@@ -266,6 +270,13 @@ def _run_weather_migrations():
 
 # Create the application
 app = create_app()
+
+# Include live sensor API router
+try:
+    from api.live import include_in_app as include_live_routes
+    include_live_routes(app)
+except ImportError:
+    logging.getLogger(__name__).info("Live sensor module not available, skipping live routes")
 
 # Initialize application state (thread-safe singleton)
 _ = get_app_state()
@@ -2986,6 +2997,261 @@ async def get_ingestion_status():
         "ingesting": _ingestion_running,
         "freshness": freshness,
         **status,
+    }
+
+
+# ============================================================================
+# CII Compliance API
+# ============================================================================
+
+
+class CIIFuelConsumption(BaseModel):
+    """Fuel consumption by type in metric tons."""
+    hfo: float = Field(0, ge=0, description="Heavy Fuel Oil (MT)")
+    lfo: float = Field(0, ge=0, description="Light Fuel Oil (MT)")
+    vlsfo: float = Field(0, ge=0, description="Very Low Sulphur Fuel Oil (MT)")
+    mdo: float = Field(0, ge=0, description="Marine Diesel Oil (MT)")
+    mgo: float = Field(0, ge=0, description="Marine Gas Oil (MT)")
+    lng: float = Field(0, ge=0, description="LNG (MT)")
+    lpg_propane: float = Field(0, ge=0, description="LPG Propane (MT)")
+    lpg_butane: float = Field(0, ge=0, description="LPG Butane (MT)")
+    methanol: float = Field(0, ge=0, description="Methanol (MT)")
+    ethanol: float = Field(0, ge=0, description="Ethanol (MT)")
+
+    def to_dict(self) -> Dict[str, float]:
+        return {k: v for k, v in self.model_dump().items() if v > 0}
+
+
+class CIICalculateRequest(BaseModel):
+    """Request for CII calculation."""
+    fuel_consumption_mt: CIIFuelConsumption
+    total_distance_nm: float = Field(..., gt=0)
+    dwt: float = Field(..., gt=0)
+    vessel_type: str = Field("tanker", description="IMO vessel type category")
+    year: int = Field(2024, ge=2019, le=2040)
+    gt: Optional[float] = Field(None, gt=0, description="Gross tonnage (for cruise/ro-ro passenger)")
+
+
+class CIIProjectRequest(BaseModel):
+    """Request for multi-year CII projection."""
+    annual_fuel_mt: CIIFuelConsumption
+    annual_distance_nm: float = Field(..., gt=0)
+    dwt: float = Field(..., gt=0)
+    vessel_type: str = Field("tanker")
+    start_year: int = Field(2024, ge=2019, le=2040)
+    end_year: int = Field(2030, ge=2019, le=2040)
+    fuel_efficiency_improvement_pct: float = Field(0, ge=0, le=20, description="Annual efficiency improvement %")
+    gt: Optional[float] = Field(None, gt=0)
+
+
+class CIIReductionRequest(BaseModel):
+    """Request for CII reduction calculation."""
+    current_fuel_mt: CIIFuelConsumption
+    current_distance_nm: float = Field(..., gt=0)
+    dwt: float = Field(..., gt=0)
+    vessel_type: str = Field("tanker")
+    target_rating: str = Field("C", description="Target rating: A, B, C, or D")
+    target_year: int = Field(2026, ge=2019, le=2040)
+    gt: Optional[float] = Field(None, gt=0)
+
+
+def _resolve_vessel_type(name: str) -> CIIVesselType:
+    """Resolve vessel type string to enum."""
+    mapping = {vt.value: vt for vt in CIIVesselType}
+    if name in mapping:
+        return mapping[name]
+    raise HTTPException(status_code=400, detail=f"Unknown vessel type: {name}. Valid: {list(mapping.keys())}")
+
+
+def _resolve_target_rating(name: str) -> CIIRating:
+    """Resolve rating string to enum."""
+    mapping = {r.value: r for r in CIIRating}
+    if name.upper() in mapping:
+        return mapping[name.upper()]
+    raise HTTPException(status_code=400, detail=f"Unknown rating: {name}. Valid: A, B, C, D, E")
+
+
+def _compliance_status(rating: CIIRating) -> str:
+    if rating in (CIIRating.A, CIIRating.B):
+        return "Compliant"
+    elif rating == CIIRating.C:
+        return "At Risk"
+    else:
+        return "Non-Compliant"
+
+
+@app.get("/api/cii/vessel-types", tags=["CII Compliance"])
+async def get_cii_vessel_types():
+    """List available IMO vessel type categories for CII calculations."""
+    vessel_types = [
+        {"id": vt.value, "name": vt.value.replace("_", " ").title()}
+        for vt in CIIVesselType
+    ]
+    return {"vessel_types": vessel_types}
+
+
+@app.get("/api/cii/fuel-types", tags=["CII Compliance"])
+async def get_cii_fuel_types():
+    """List available fuel types and their CO2 emission factors."""
+    fuel_types = [
+        {"id": fuel, "name": fuel.upper().replace("_", " "), "co2_factor": factor}
+        for fuel, factor in CIICalculator.CO2_FACTORS.items()
+    ]
+    return {"fuel_types": fuel_types}
+
+
+@app.post("/api/cii/calculate", tags=["CII Compliance"])
+async def calculate_cii(request: CIICalculateRequest):
+    """Calculate CII rating for given fuel consumption and distance."""
+    vtype = _resolve_vessel_type(request.vessel_type)
+    gt = request.gt if vtype in (CIIVesselType.CRUISE_PASSENGER, CIIVesselType.RO_RO_PASSENGER) else None
+
+    try:
+        calc = CIICalculator(vessel_type=vtype, dwt=request.dwt, year=request.year, gt=gt)
+        result = calc.calculate(request.fuel_consumption_mt.to_dict(), request.total_distance_nm)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "year": result.year,
+        "rating": result.rating.value,
+        "compliance_status": _compliance_status(result.rating),
+        "attained_cii": result.attained_cii,
+        "required_cii": result.required_cii,
+        "rating_boundaries": result.rating_boundaries,
+        "reduction_factor": result.reduction_factor,
+        "total_co2_mt": result.total_co2_mt,
+        "total_distance_nm": result.total_distance_nm,
+        "capacity": result.capacity,
+        "vessel_type": result.vessel_type.value,
+        "margin_to_downgrade": result.margin_to_downgrade,
+        "margin_to_upgrade": result.margin_to_upgrade,
+    }
+
+
+@app.post("/api/cii/project", tags=["CII Compliance"])
+async def project_cii(request: CIIProjectRequest):
+    """Project CII rating across multiple years with optional efficiency improvements."""
+    vtype = _resolve_vessel_type(request.vessel_type)
+    gt = request.gt if vtype in (CIIVesselType.CRUISE_PASSENGER, CIIVesselType.RO_RO_PASSENGER) else None
+
+    try:
+        calc = CIICalculator(vessel_type=vtype, dwt=request.dwt, year=request.start_year, gt=gt)
+        years = list(range(request.start_year, request.end_year + 1))
+        projections = calc.project_rating(
+            request.annual_fuel_mt.to_dict(),
+            request.annual_distance_nm,
+            years=years,
+            fuel_reduction_rate=request.fuel_efficiency_improvement_pct,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    proj_list = [
+        {
+            "year": p.year,
+            "rating": p.rating.value,
+            "attained_cii": p.attained_cii,
+            "required_cii": p.required_cii,
+            "reduction_factor": p.reduction_factor,
+            "status": p.status,
+        }
+        for p in projections
+    ]
+
+    # Build summary
+    current_rating = projections[0].rating.value if projections else "?"
+    final_rating = projections[-1].rating.value if projections else "?"
+    years_until_d = next(
+        (p.year - projections[0].year for p in projections if p.rating in (CIIRating.D, CIIRating.E)),
+        "N/A"
+    )
+    years_until_e = next(
+        (p.year - projections[0].year for p in projections if p.rating == CIIRating.E),
+        "N/A"
+    )
+
+    if final_rating in ("D", "E"):
+        recommendation = f"Action required: rating degrades to {final_rating} by {projections[-1].year}."
+    elif final_rating == "C":
+        recommendation = "Borderline: rating reaches C. Consider efficiency improvements."
+    else:
+        recommendation = f"On track: rating remains {final_rating} through {projections[-1].year}."
+
+    return {
+        "projections": proj_list,
+        "summary": {
+            "current_rating": current_rating,
+            "final_rating": final_rating,
+            "years_until_d_rating": years_until_d,
+            "years_until_e_rating": years_until_e,
+            "recommendation": recommendation,
+        },
+    }
+
+
+@app.post("/api/cii/reduction", tags=["CII Compliance"])
+async def calculate_cii_reduction(request: CIIReductionRequest):
+    """Calculate fuel reduction needed to achieve a target CII rating."""
+    vtype = _resolve_vessel_type(request.vessel_type)
+    target = _resolve_target_rating(request.target_rating)
+    gt = request.gt if vtype in (CIIVesselType.CRUISE_PASSENGER, CIIVesselType.RO_RO_PASSENGER) else None
+
+    try:
+        calc = CIICalculator(vessel_type=vtype, dwt=request.dwt, year=request.target_year, gt=gt)
+        result = calc.calculate_required_reduction(
+            request.current_fuel_mt.to_dict(),
+            request.current_distance_nm,
+            target_rating=target,
+            target_year=request.target_year,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return result
+
+
+# ============================================================================
+# Weather Freshness
+# ============================================================================
+
+
+@app.get("/api/weather/freshness", tags=["Weather"])
+async def get_weather_freshness():
+    """Get weather data freshness indicator (age of most recent data)."""
+    if db_weather is None:
+        return {
+            "status": "unavailable",
+            "message": "Weather database not configured",
+            "age_hours": None,
+            "color": "red",
+        }
+
+    freshness = db_weather.get_freshness()
+    if freshness is None:
+        return {
+            "status": "no_data",
+            "message": "No weather data ingested yet",
+            "age_hours": None,
+            "color": "red",
+        }
+
+    age_hours = freshness.get("age_hours", None) if isinstance(freshness, dict) else None
+    if age_hours is not None:
+        if age_hours < 4:
+            color = "green"
+        elif age_hours < 12:
+            color = "yellow"
+        else:
+            color = "red"
+    else:
+        color = "red"
+
+    return {
+        "status": "ok",
+        "age_hours": age_hours,
+        "color": color,
+        **(freshness if isinstance(freshness, dict) else {"raw": freshness}),
     }
 
 

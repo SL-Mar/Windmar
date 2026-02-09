@@ -69,7 +69,7 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 windmar/
 ├── api/                        # FastAPI backend
 │   ├── main.py                 # API endpoints, weather ingestion loop, DB provider chain
-│   ├── auth.py                 # JWT / API key authentication
+│   ├── auth.py                 # API key authentication (bcrypt)
 │   ├── config.py               # API configuration (pydantic-settings)
 │   ├── middleware.py            # Security headers, structured logging, metrics
 │   ├── rate_limit.py           # Token bucket rate limiter (Redis-backed)
@@ -78,7 +78,9 @@ windmar/
 │   ├── health.py               # Health check logic
 │   ├── state.py                # Thread-safe application state
 │   ├── cache.py                # Weather data caching (Redis shared cache)
-│   └── resilience.py           # Circuit breakers
+│   ├── resilience.py           # Circuit breakers
+│   ├── cli.py                  # CLI utilities
+│   └── live.py                 # Live sensor data API router
 ├── src/
 │   ├── optimization/
 │   │   ├── vessel_model.py     # Holtrop-Mennen fuel consumption model
@@ -97,10 +99,10 @@ windmar/
 │   │   └── land_mask.py        # Ocean/land detection
 │   ├── sensors/
 │   │   ├── sbg_nmea.py         # SBG IMU NMEA parsing
-│   │   └── sbg_ellipse.py      # SBG Ellipse sensor driver
-│   ├── fusion/
-│   │   ├── fusion_engine.py    # Multi-source data fusion
+│   │   ├── sbg_ellipse.py      # SBG Ellipse sensor driver
 │   │   └── wave_estimator.py   # FFT wave spectrum from heave data
+│   ├── fusion/
+│   │   └── fusion_engine.py    # Multi-source data fusion
 │   ├── compliance/
 │   │   └── cii.py              # IMO CII rating calculations
 │   ├── routes/
@@ -113,7 +115,7 @@ windmar/
 │   ├── components/             # React components (maps, charts, weather layers, forecast timeline)
 │   └── lib/                    # API client, utilities
 ├── tests/
-│   ├── unit/                   # Vessel model, router, validation, ECA zones, Excel parser
+│   ├── unit/                   # Vessel model, router, validation, ECA zones, Excel parser, CII, calibration, SBG NMEA, metrics
 │   ├── integration/            # API endpoints, optimization flow
 │   └── test_e2e_*.py           # End-to-end sensor integration
 ├── examples/                   # Demo scripts (simple, ARA-MED, calibration)
@@ -135,7 +137,7 @@ windmar/
 | Database | PostgreSQL 16, SQLAlchemy |
 | Cache | Redis 7 |
 | Scientific | NumPy, SciPy, Pandas |
-| Auth | JWT, API keys, bcrypt |
+| Auth | API keys, bcrypt |
 | Containerization | Docker, Docker Compose |
 
 ## Quick Start
@@ -189,7 +191,7 @@ Copy `.env.example` to `.env` and configure:
 | `ENVIRONMENT` | development / staging / production | development |
 | `DATABASE_URL` | PostgreSQL connection string | postgresql://windmar:...@db:5432/windmar |
 | `REDIS_URL` | Redis connection string | redis://:...@redis:6379/0 |
-| `API_SECRET_KEY` | JWT signing key | (generate with `openssl rand -hex 32`) |
+| `API_SECRET_KEY` | API key hashing secret | (generate with `openssl rand -hex 32`) |
 | `CORS_ORIGINS` | Allowed frontend origins | http://localhost:3000 |
 | `COPERNICUS_MOCK_MODE` | Use synthetic weather data | true |
 | `AUTH_ENABLED` | Require API key authentication | true |
@@ -242,10 +244,15 @@ See the [Monte Carlo Simulation](https://quantcoder-fs.com/windmar/monte-carlo.h
 - `GET /api/weather/currents/velocity` - Currents in leaflet-velocity format
 - `GET /api/weather/point` - Weather at specific coordinates
 
-### Forecast
+### Forecast (Wind)
 - `GET /api/weather/forecast/status` - GFS prefetch progress and run info
 - `POST /api/weather/forecast/prefetch` - Trigger 5-day forecast download (f000–f120)
 - `GET /api/weather/forecast/frames` - Bulk download all forecast frames
+
+### Forecast (Wave)
+- `GET /api/weather/forecast/wave/status` - Wave forecast prefetch progress
+- `POST /api/weather/forecast/wave/prefetch` - Trigger wave forecast download
+- `GET /api/weather/forecast/wave/frames` - Bulk download wave forecast frames
 
 ### Routes
 - `POST /api/routes/parse-rtz` - Parse RTZ route file
@@ -260,6 +267,7 @@ See the [Monte Carlo Simulation](https://quantcoder-fs.com/windmar/monte-carlo.h
 
 ### Optimization
 - `POST /api/optimize/route` - A\* weather-optimal route finding
+- `GET /api/optimize/status` - Optimizer configuration and available targets
 
 ### Weather Ingestion
 - `POST /api/weather/ingest` - Trigger immediate weather ingestion cycle
@@ -269,17 +277,50 @@ See the [Monte Carlo Simulation](https://quantcoder-fs.com/windmar/monte-carlo.h
 ### Vessel
 - `GET /api/vessel/specs` - Current vessel specifications
 - `POST /api/vessel/specs` - Update vessel specifications
+- `GET /api/vessel/calibration` - Current calibration factors
+- `POST /api/vessel/calibration/set` - Manually set calibration factors
 - `POST /api/vessel/calibrate` - Run calibration from noon reports
-- `POST /api/vessel/noon-reports/upload-csv` - Upload operational data
+- `POST /api/vessel/calibration/estimate-fouling` - Estimate hull fouling factor
+- `GET /api/vessel/noon-reports` - List uploaded noon reports
+- `POST /api/vessel/noon-reports` - Add a single noon report
+- `POST /api/vessel/noon-reports/upload-csv` - Upload operational data (CSV)
+- `DELETE /api/vessel/noon-reports` - Clear all noon reports
 
 ### Zones
 - `GET /api/zones` - All regulatory zones (GeoJSON)
+- `GET /api/zones/list` - Zone summary list
+- `GET /api/zones/{zone_id}` - Single zone details
 - `POST /api/zones` - Create custom zone
-- `GET /api/zones/check-path` - Check zone intersections
+- `DELETE /api/zones/{zone_id}` - Delete a custom zone
+- `GET /api/zones/at-point` - Zones at specific coordinates
+- `GET /api/zones/check-path` - Check zone intersections along a route
+
+### CII Compliance
+- `GET /api/cii/vessel-types` - IMO vessel type categories
+- `GET /api/cii/fuel-types` - Fuel types and CO2 emission factors
+- `POST /api/cii/calculate` - Calculate CII rating
+- `POST /api/cii/project` - Multi-year CII projection
+- `POST /api/cii/reduction` - Required fuel reduction for target rating
+
+### Live Sensor Data
+- `GET /api/live/status` - Sensor connection status
+- `POST /api/live/connect` - Connect to SBG IMU sensor
+- `POST /api/live/disconnect` - Disconnect sensor
+- `GET /api/live/data` - Current fused sensor data
+- `GET /api/live/timeseries/{channel}` - Time series for a specific channel
+- `GET /api/live/timeseries` - All time series data
+- `GET /api/live/motion/statistics` - Motion statistics (roll, pitch, heave)
+- `GET /api/live/channels` - Available data channels
+- `POST /api/live/export` - Export recorded data
 
 ### System
 - `GET /api/health` - Health check
+- `GET /api/health/live` - Liveness probe
+- `GET /api/health/ready` - Readiness probe
+- `GET /api/status` - Application status summary
 - `GET /api/metrics` - Prometheus metrics
+- `GET /api/metrics/json` - Metrics in JSON format
+- `GET /api/data-sources` - Weather data source configuration
 
 Full interactive documentation at `/api/docs` when the server is running.
 

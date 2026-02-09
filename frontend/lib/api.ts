@@ -476,6 +476,169 @@ export interface CalibrationResult {
   }>;
 }
 
+// CII Compliance types
+export interface VesselTypeInfo {
+  id: string;
+  name: string;
+}
+
+export interface FuelTypeInfo {
+  id: string;
+  name: string;
+  co2_factor: number;
+}
+
+export interface CIICalculationRequest {
+  fuel_consumption_mt: Record<string, number>;
+  total_distance_nm: number;
+  dwt: number;
+  vessel_type: string;
+  year: number;
+  gt?: number;
+}
+
+export interface CIICalculationResponse {
+  year: number;
+  rating: string;
+  compliance_status: string;
+  attained_cii: number;
+  required_cii: number;
+  rating_boundaries: Record<string, number>;
+  reduction_factor: number;
+  total_co2_mt: number;
+  total_distance_nm: number;
+  capacity: number;
+  vessel_type: string;
+  margin_to_downgrade: number;
+  margin_to_upgrade: number;
+}
+
+export interface CIIProjectionRequest {
+  annual_fuel_mt: Record<string, number>;
+  annual_distance_nm: number;
+  dwt: number;
+  vessel_type: string;
+  start_year: number;
+  end_year: number;
+  fuel_efficiency_improvement_pct: number;
+  gt?: number;
+}
+
+export interface CIIProjectionItem {
+  year: number;
+  rating: string;
+  attained_cii: number;
+  required_cii: number;
+  reduction_factor: number;
+  status: string;
+}
+
+export interface CIIProjectionSummary {
+  current_rating: string;
+  final_rating: string;
+  years_until_d_rating: number | string;
+  years_until_e_rating: number | string;
+  recommendation: string;
+}
+
+export interface CIIProjectionResponse {
+  projections: CIIProjectionItem[];
+  summary: CIIProjectionSummary;
+}
+
+export interface CIIReductionRequest {
+  current_fuel_mt: Record<string, number>;
+  current_distance_nm: number;
+  dwt: number;
+  vessel_type: string;
+  target_rating: string;
+  target_year: number;
+  gt?: number;
+}
+
+export interface CIIReductionResponse {
+  reduction_needed_pct: number;
+  current_cii: number;
+  target_cii: number;
+  current_rating: string;
+  target_rating: string;
+  fuel_savings_mt: number;
+  message: string;
+}
+
+// Fuel Analysis types
+export interface FuelScenario {
+  name: string;
+  conditions: string;
+  fuel_mt: number;
+  power_kw: number;
+}
+
+// Live Sensor types
+export interface SensorStatus {
+  connected: boolean;
+  streaming: boolean;
+  connection_type: string;
+  message_count: number;
+  parse_errors: number;
+  last_message_time: string | null;
+}
+
+export interface LiveData {
+  timestamp: string;
+  position: {
+    latitude: number;
+    longitude: number;
+  };
+  velocity: {
+    sog_kts: number;
+    cog_deg: number;
+  };
+  attitude: {
+    heading_deg: number;
+    roll_deg: number;
+    pitch_deg: number;
+  };
+  motion: {
+    heave_m: number;
+    surge_m: number;
+  };
+  status: {
+    satellites: number;
+    gnss_fix: number;
+    hdop: number;
+  };
+}
+
+export interface SensorConfig {
+  connection_type: string;
+  port?: string;
+  baudrate?: number;
+}
+
+export function createLiveWebSocket(
+  onData: (data: LiveData) => void,
+  onError: (error: Event) => void,
+  onClose: () => void,
+): WebSocket {
+  const wsUrl = API_BASE_URL.replace(/^http/, 'ws') + '/api/live/ws';
+  const ws = new WebSocket(wsUrl);
+
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data) as LiveData;
+      onData(data);
+    } catch (e) {
+      console.error('Failed to parse live data:', e);
+    }
+  };
+
+  ws.onerror = onError;
+  ws.onclose = onClose;
+
+  return ws;
+}
+
 // ============================================================================
 // API Functions
 // ============================================================================
@@ -804,6 +967,90 @@ export const apiClient = {
     }>;
   }> {
     const response = await api.get('/api/zones/at-point', { params: { lat, lon } });
+    return response.data;
+  },
+
+  // -------------------------------------------------------------------------
+  // CII Compliance API
+  // -------------------------------------------------------------------------
+
+  async getVesselTypes(): Promise<{ vessel_types: VesselTypeInfo[] }> {
+    const response = await api.get('/api/cii/vessel-types');
+    return response.data;
+  },
+
+  async getFuelTypes(): Promise<{ fuel_types: FuelTypeInfo[] }> {
+    const response = await api.get('/api/cii/fuel-types');
+    return response.data;
+  },
+
+  async calculateCII(request: CIICalculationRequest): Promise<CIICalculationResponse> {
+    const response = await api.post<CIICalculationResponse>('/api/cii/calculate', request);
+    return response.data;
+  },
+
+  async projectCII(request: CIIProjectionRequest): Promise<CIIProjectionResponse> {
+    const response = await api.post<CIIProjectionResponse>('/api/cii/project', request);
+    return response.data;
+  },
+
+  async calculateCIIReduction(request: CIIReductionRequest): Promise<CIIReductionResponse> {
+    const response = await api.post<CIIReductionResponse>('/api/cii/reduction', request);
+    return response.data;
+  },
+
+  // -------------------------------------------------------------------------
+  // Fuel Analysis API
+  // -------------------------------------------------------------------------
+
+  async getFuelScenarios(): Promise<{ scenarios: FuelScenario[] }> {
+    // Fuel scenarios are computed from vessel model at different conditions
+    const specs = await this.getVesselSpecs();
+    const scenarios: FuelScenario[] = [
+      {
+        name: 'Calm Water (Laden)',
+        conditions: `${specs.service_speed_laden} kts, no wind/waves`,
+        fuel_mt: specs.sfoc_at_mcr * specs.mcr_kw * 0.75 * 24 / 1e6,
+        power_kw: specs.mcr_kw * 0.75,
+      },
+      {
+        name: 'Head Wind (Laden)',
+        conditions: `${specs.service_speed_laden} kts, 20 kt head wind`,
+        fuel_mt: specs.sfoc_at_mcr * specs.mcr_kw * 0.85 * 24 / 1e6,
+        power_kw: specs.mcr_kw * 0.85,
+      },
+      {
+        name: 'Rough Seas (Laden)',
+        conditions: `${specs.service_speed_laden} kts, 3m waves`,
+        fuel_mt: specs.sfoc_at_mcr * specs.mcr_kw * 0.90 * 24 / 1e6,
+        power_kw: specs.mcr_kw * 0.90,
+      },
+      {
+        name: 'Calm Water (Ballast)',
+        conditions: `${specs.service_speed_ballast} kts, no wind/waves`,
+        fuel_mt: specs.sfoc_at_mcr * specs.mcr_kw * 0.55 * 24 / 1e6,
+        power_kw: specs.mcr_kw * 0.55,
+      },
+    ];
+    return { scenarios };
+  },
+
+  // -------------------------------------------------------------------------
+  // Live Sensor API
+  // -------------------------------------------------------------------------
+
+  async getSensorStatus(): Promise<SensorStatus> {
+    const response = await api.get<SensorStatus>('/api/live/status');
+    return response.data;
+  },
+
+  async connectSensor(config: SensorConfig): Promise<{ status: string }> {
+    const response = await api.post('/api/live/connect', config);
+    return response.data;
+  },
+
+  async disconnectSensor(): Promise<{ status: string }> {
+    const response = await api.post('/api/live/disconnect');
     return response.data;
   },
 };
