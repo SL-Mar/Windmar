@@ -93,6 +93,29 @@ class OptimizedRoute:
     optimization_time_ms: float
     variable_speed_enabled: bool
 
+    # Speed strategy scenarios (populated when baseline provided)
+    scenarios: List['SpeedScenario'] = field(default_factory=list)
+
+    # Baseline reference (from voyage calculation)
+    baseline_fuel_mt: float = 0.0
+    baseline_time_hours: float = 0.0
+    baseline_distance_nm: float = 0.0
+
+
+@dataclass
+class SpeedScenario:
+    """One speed strategy applied to the optimized path."""
+    strategy: str            # "constant_speed" or "match_eta"
+    label: str               # "Same Speed" or "Match ETA"
+    total_fuel_mt: float
+    total_time_hours: float
+    total_distance_nm: float  # same for both (same path)
+    avg_speed_kts: float
+    speed_profile: List[float]
+    leg_details: List[Dict]
+    fuel_savings_pct: float   # vs baseline
+    time_savings_pct: float   # vs baseline
+
 
 class RouteOptimizer:
     """
@@ -173,9 +196,16 @@ class RouteOptimizer:
         max_cells: int = DEFAULT_MAX_CELLS,
         avoid_land: bool = True,
         max_time_factor: float = 1.15,
+        baseline_time_hours: Optional[float] = None,
+        baseline_fuel_mt: Optional[float] = None,
+        baseline_distance_nm: Optional[float] = None,
+        route_waypoints: Optional[List[Tuple[float, float]]] = None,
     ) -> OptimizedRoute:
         """
         Find optimal route from origin to destination.
+
+        If route_waypoints is provided (>2 points), optimizes each consecutive
+        segment independently, respecting intermediate waypoints as via-points.
 
         Args:
             origin: (lat, lon) starting point
@@ -186,6 +216,7 @@ class RouteOptimizer:
             weather_provider: Function(lat, lon, time) -> LegWeather
             max_cells: Maximum cells to explore
             avoid_land: Whether to avoid land masses
+            route_waypoints: All user waypoints for multi-segment optimization
 
         Returns:
             OptimizedRoute with waypoints and statistics
@@ -210,17 +241,15 @@ class RouteOptimizer:
         )
         self._lambda_time = service_fuel_result['fuel_mt'] * 1.0
 
-        # Build grid around origin-destination corridor
-        grid = self._build_grid(origin, destination)
+        # Build grid around origin-destination corridor and run A*
+        grid = self._build_grid([origin, destination])
 
-        # Get start and end cells
         start_cell = self._get_cell(origin[0], origin[1], grid)
         end_cell = self._get_cell(destination[0], destination[1], grid)
 
         if start_cell is None or end_cell is None:
             raise ValueError("Origin or destination outside grid bounds")
 
-        # Run A* search
         path, cells_explored = self._astar_search(
             start_cell=start_cell,
             end_cell=end_cell,
@@ -234,43 +263,84 @@ class RouteOptimizer:
         if path is None:
             raise ValueError(f"No route found after exploring {cells_explored} cells")
 
-        # Convert path to waypoints
         waypoints = [(cell.lat, cell.lon) for cell in path]
-
-        # Smooth path to reduce unnecessary waypoints
         waypoints = self._smooth_path(waypoints)
+
+        # "Direct" route = user's original waypoints if provided, else straight line
+        direct_wps = list(route_waypoints) if route_waypoints and len(route_waypoints) > 2 else [origin, destination]
 
         # Calculate direct route for comparison (constant speed to match voyage calculator)
         direct_fuel, direct_time, direct_distance, _, _, _ = self._calculate_route_stats(
-            [origin, destination], departure_time, calm_speed_kts, is_laden, use_variable_speed=False
+            direct_wps, departure_time, calm_speed_kts, is_laden, use_variable_speed=False
         )
 
-        # Calculate route statistics with variable speed optimization
-        opt_fuel, opt_time, opt_distance, leg_details, safety_summary, speed_profile = self._calculate_route_stats(
-            waypoints, departure_time, calm_speed_kts, is_laden, use_variable_speed=self.variable_speed
+        # ── Scenario 1: Constant Speed (same calm_speed_kts on optimized path) ──
+        cs_fuel, cs_time, cs_dist, cs_legs, cs_safety, cs_speeds = self._calculate_route_stats(
+            waypoints, departure_time, calm_speed_kts, is_laden, use_variable_speed=False
         )
 
-        # Enforce time budget: if variable speed made the route too slow, recalculate
-        # with per-leg target times so total time stays within max_time_factor of direct
-        max_allowed_time = direct_time * max_time_factor
-        if self.variable_speed and opt_time > max_allowed_time and len(waypoints) > 1:
-            logger.info(
-                f"Variable speed exceeded time budget: {opt_time:.1f}h > {max_allowed_time:.1f}h "
-                f"(direct={direct_time:.1f}h x {max_time_factor}). Recalculating with time constraint."
+        # ── Scenario 2: Match ETA (slow-steam to match baseline or direct time) ──
+        # Use baseline time if provided (from voyage calculation), else direct_time * max_time_factor
+        eta_target_time = baseline_time_hours if baseline_time_hours is not None else direct_time * max_time_factor
+        eta_fuel, eta_time, eta_dist, eta_legs, eta_safety, eta_speeds = (
+            self._calculate_route_stats_time_constrained(
+                waypoints, departure_time, calm_speed_kts, is_laden, eta_target_time
             )
-            opt_fuel, opt_time, opt_distance, leg_details, safety_summary, speed_profile = (
-                self._calculate_route_stats_time_constrained(
-                    waypoints, departure_time, calm_speed_kts, is_laden, max_allowed_time
-                )
-            )
+        )
 
         optimization_time_ms = (time.time() - start_time) * 1000
 
-        # Calculate savings
+        # Use baseline values for savings calculation if provided, else use direct route
+        ref_fuel = baseline_fuel_mt if baseline_fuel_mt is not None else direct_fuel
+        ref_time = baseline_time_hours if baseline_time_hours is not None else direct_time
+        ref_dist = baseline_distance_nm if baseline_distance_nm is not None else direct_distance
+
+        # Build scenarios
+        scenarios = []
+
+        # Scenario 1: Constant Speed
+        cs_fuel_savings = ((ref_fuel - cs_fuel) / ref_fuel * 100) if ref_fuel > 0 else 0
+        cs_time_savings = ((ref_time - cs_time) / ref_time * 100) if ref_time > 0 else 0
+        scenarios.append(SpeedScenario(
+            strategy="constant_speed",
+            label="Same Speed",
+            total_fuel_mt=cs_fuel,
+            total_time_hours=cs_time,
+            total_distance_nm=cs_dist,
+            avg_speed_kts=cs_dist / cs_time if cs_time > 0 else calm_speed_kts,
+            speed_profile=cs_speeds,
+            leg_details=cs_legs,
+            fuel_savings_pct=cs_fuel_savings,
+            time_savings_pct=cs_time_savings,
+        ))
+
+        # Scenario 2: Match ETA
+        eta_fuel_savings = ((ref_fuel - eta_fuel) / ref_fuel * 100) if ref_fuel > 0 else 0
+        eta_time_savings = ((ref_time - eta_time) / ref_time * 100) if ref_time > 0 else 0
+        scenarios.append(SpeedScenario(
+            strategy="match_eta",
+            label="Match ETA",
+            total_fuel_mt=eta_fuel,
+            total_time_hours=eta_time,
+            total_distance_nm=eta_dist,
+            avg_speed_kts=eta_dist / eta_time if eta_time > 0 else calm_speed_kts,
+            speed_profile=eta_speeds,
+            leg_details=eta_legs,
+            fuel_savings_pct=eta_fuel_savings,
+            time_savings_pct=eta_time_savings,
+        ))
+
+        # Default top-level fields use Constant Speed scenario for backward compat
+        opt_fuel = cs_fuel
+        opt_time = cs_time
+        opt_distance = cs_dist
+        leg_details = cs_legs
+        speed_profile = cs_speeds
+        safety_summary = cs_safety
+
+        # Calculate savings vs direct route (top-level fields always vs direct)
         fuel_savings = ((direct_fuel - opt_fuel) / direct_fuel * 100) if direct_fuel > 0 else 0
         time_savings = ((direct_time - opt_time) / direct_time * 100) if direct_time > 0 else 0
-
-        # Average speed = total distance / total time (SOG-based)
         avg_speed = opt_distance / opt_time if opt_time > 0 else calm_speed_kts
 
         return OptimizedRoute(
@@ -294,29 +364,33 @@ class RouteOptimizer:
             cells_explored=cells_explored,
             optimization_time_ms=optimization_time_ms,
             variable_speed_enabled=self.variable_speed,
+            scenarios=scenarios,
+            baseline_fuel_mt=ref_fuel,
+            baseline_time_hours=ref_time,
+            baseline_distance_nm=ref_dist,
         )
 
     def _build_grid(
         self,
-        origin: Tuple[float, float],
-        destination: Tuple[float, float],
+        corridor_waypoints: List[Tuple[float, float]],
         margin_deg: float = 5.0,
         filter_land: bool = True,
     ) -> Dict[Tuple[int, int], GridCell]:
         """
-        Build routing grid around origin-destination corridor.
+        Build routing grid covering the corridor defined by waypoints.
 
-        Adds margin around the direct path to allow for deviations.
+        Computes a bounding box around ALL waypoints with margin, so A*
+        can explore the full area the user intended.
         Filters out land cells if filter_land=True.
         """
-        lat1, lon1 = origin
-        lat2, lon2 = destination
+        lats = [wp[0] for wp in corridor_waypoints]
+        lons = [wp[1] for wp in corridor_waypoints]
 
-        # Calculate bounding box with margin
-        lat_min = min(lat1, lat2) - margin_deg
-        lat_max = max(lat1, lat2) + margin_deg
-        lon_min = min(lon1, lon2) - margin_deg
-        lon_max = max(lon1, lon2) + margin_deg
+        # Calculate bounding box with margin around all waypoints
+        lat_min = min(lats) - margin_deg
+        lat_max = max(lats) + margin_deg
+        lon_min = min(lons) - margin_deg
+        lon_max = max(lons) + margin_deg
 
         # Clamp to valid ranges
         lat_min = max(lat_min, -85)
@@ -840,7 +914,54 @@ class RouteOptimizer:
 
                 return [points[0], points[-1]]
 
-        return simplify(waypoints, tolerance_nm)
+        smoothed = simplify(waypoints, tolerance_nm)
+
+        # Second pass: remove waypoints that create insignificant course changes
+        # (grid staircase artifacts that Douglas-Peucker keeps)
+        smoothed = self._remove_small_turns(smoothed, min_turn_deg=15.0, check_land=check_land)
+
+        return smoothed
+
+    def _remove_small_turns(
+        self,
+        waypoints: List[Tuple[float, float]],
+        min_turn_deg: float = 15.0,
+        check_land: bool = True,
+    ) -> List[Tuple[float, float]]:
+        """
+        Remove waypoints that don't contribute a significant course change.
+
+        Iterates through waypoints; if the turn angle at a waypoint is below
+        min_turn_deg AND the direct path from the previous kept waypoint to the
+        next one is clear of land, drop it.
+        """
+        if len(waypoints) <= 2:
+            return waypoints
+
+        result = [waypoints[0]]
+
+        for i in range(1, len(waypoints) - 1):
+            bearing_in = self._calculate_bearing(
+                result[-1][0], result[-1][1], waypoints[i][0], waypoints[i][1]
+            )
+            bearing_out = self._calculate_bearing(
+                waypoints[i][0], waypoints[i][1], waypoints[i + 1][0], waypoints[i + 1][1]
+            )
+            turn = abs(((bearing_out - bearing_in) + 180) % 360 - 180)
+
+            if turn < min_turn_deg:
+                # Small turn — check if we can skip this waypoint
+                if check_land and not is_path_clear(
+                    result[-1][0], result[-1][1], waypoints[i + 1][0], waypoints[i + 1][1]
+                ):
+                    result.append(waypoints[i])  # Keep — removing would cross land
+                # else: skip this waypoint (insignificant turn, path clear)
+            else:
+                result.append(waypoints[i])  # Keep — genuine course change
+
+        result.append(waypoints[-1])
+        logger.info(f"Turn-angle filter: {len(waypoints)} → {len(result)} waypoints (min turn {min_turn_deg}°)")
+        return result
 
     def _calculate_route_stats(
         self,

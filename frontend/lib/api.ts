@@ -290,6 +290,12 @@ export interface OptimizationRequest {
   optimization_target: 'fuel' | 'time';
   grid_resolution_deg: number;
   max_time_factor: number;
+  // All user waypoints for multi-segment optimization
+  route_waypoints?: Position[];
+  // Baseline from voyage calculation (enables dual-strategy comparison)
+  baseline_fuel_mt?: number;
+  baseline_time_hours?: number;
+  baseline_distance_nm?: number;
 }
 
 export interface WeatherProvenance {
@@ -328,6 +334,19 @@ export interface SafetySummary {
   max_accel_ms2: number;
 }
 
+export interface SpeedScenario {
+  strategy: 'constant_speed' | 'match_eta';
+  label: string;
+  total_fuel_mt: number;
+  total_time_hours: number;
+  total_distance_nm: number;
+  avg_speed_kts: number;
+  speed_profile: number[];
+  legs: OptimizationLeg[];
+  fuel_savings_pct: number;
+  time_savings_pct: number;
+}
+
 export interface OptimizationResponse {
   waypoints: Position[];
   total_fuel_mt: number;
@@ -344,6 +363,11 @@ export interface OptimizationResponse {
   variable_speed_enabled: boolean;
   // Safety assessment
   safety?: SafetySummary;
+  // Speed strategy scenarios
+  scenarios: SpeedScenario[];
+  baseline_fuel_mt?: number;
+  baseline_time_hours?: number;
+  baseline_distance_nm?: number;
   // Weather provenance
   weather_provenance?: WeatherProvenance[];
   temporal_weather: boolean;

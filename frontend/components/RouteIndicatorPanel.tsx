@@ -5,7 +5,7 @@ import {
   PenLine, Upload, Navigation, Compass, Loader2, ChevronDown, ChevronUp,
   Trash2, MapPin, Play,
 } from 'lucide-react';
-import { Position, OptimizationResponse } from '@/lib/api';
+import { Position, OptimizationResponse, SpeedScenario } from '@/lib/api';
 import SavedRoutes from '@/components/SavedRoutes';
 import RouteImport from '@/components/RouteImport';
 
@@ -26,6 +26,8 @@ interface RouteIndicatorPanelProps {
   onRouteImport: (waypoints: Position[], name: string) => void;
   onLoadRoute: (waypoints: Position[]) => void;
   onClearRoute: () => void;
+  // Whether a voyage baseline has been calculated (gates Optimize button)
+  hasBaseline?: boolean;
   // Analysis result summary (if displayed)
   analysisFuel?: number;
   analysisTime?: number;
@@ -49,12 +51,14 @@ export default function RouteIndicatorPanel({
   onRouteImport,
   onLoadRoute,
   onClearRoute,
+  hasBaseline,
   analysisFuel,
   analysisTime,
   analysisAvgSpeed,
 }: RouteIndicatorPanelProps) {
   const [savedRoutesExpanded, setSavedRoutesExpanded] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [selectedStrategy, setSelectedStrategy] = useState<'constant_speed' | 'match_eta'>('match_eta');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Calculate bearing from first to last WP
@@ -222,8 +226,9 @@ export default function RouteIndicatorPanel({
           </button>
           <button
             onClick={onOptimize}
-            disabled={isOptimizing || waypoints.length < 2}
+            disabled={isOptimizing || waypoints.length < 2 || !hasBaseline}
             className="flex-1 flex items-center justify-center gap-1.5 py-2 bg-gradient-to-r from-green-600 to-emerald-500 text-white text-sm font-medium rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+            title={!hasBaseline ? 'Calculate Voyage first to establish baseline' : 'Optimize route using A* search'}
           >
             {isOptimizing ? (
               <><Loader2 className="w-4 h-4 animate-spin" />Optimizing...</>
@@ -234,65 +239,99 @@ export default function RouteIndicatorPanel({
         </div>
 
         {/* Optimized route comparison */}
-        {optimizationResult && (
-          <div className="px-3 pb-3">
-            <div className={`p-2 ${optimizationResult.fuel_savings_pct > 0 ? 'bg-green-500/10 border border-green-500/30' : 'bg-amber-500/10 border border-amber-500/30'} rounded-lg mb-2`}>
-              <div className="flex justify-between text-xs mb-2">
-                <span className={`${optimizationResult.fuel_savings_pct > 0 ? 'text-green-400' : 'text-amber-400'} font-medium`}>Route Comparison</span>
-                <span className={optimizationResult.fuel_savings_pct > 0 ? 'text-green-400' : 'text-amber-400'}>
-                  {optimizationResult.fuel_savings_pct > 0
-                    ? `${optimizationResult.fuel_savings_pct.toFixed(1)}% fuel savings`
-                    : `${Math.abs(optimizationResult.fuel_savings_pct).toFixed(1)}% fuel increase`}
-                </span>
+        {optimizationResult && (() => {
+          const scenarios = optimizationResult.scenarios ?? [];
+          const scenario = scenarios.find(s => s.strategy === selectedStrategy) || scenarios[0];
+          const baselineFuel = optimizationResult.baseline_fuel_mt ?? optimizationResult.direct_fuel_mt;
+          const baselineTime = optimizationResult.baseline_time_hours ?? optimizationResult.direct_time_hours;
+          const baselineDist = optimizationResult.baseline_distance_nm ?? totalDistance;
+          const fuelSavings = scenario?.fuel_savings_pct ?? optimizationResult.fuel_savings_pct;
+          const isPositive = fuelSavings > 0;
+
+          return (
+            <div className="px-3 pb-3">
+              {/* Strategy tabs */}
+              {scenarios.length > 1 && (
+                <div className="flex gap-1 mb-2">
+                  {scenarios.map(sc => (
+                    <button
+                      key={sc.strategy}
+                      onClick={() => setSelectedStrategy(sc.strategy)}
+                      className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                        selectedStrategy === sc.strategy
+                          ? 'bg-green-600/30 text-green-300 border border-green-500/50'
+                          : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
+                      }`}
+                    >
+                      {sc.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <div className={`p-2 ${isPositive ? 'bg-green-500/10 border border-green-500/30' : 'bg-amber-500/10 border border-amber-500/30'} rounded-lg mb-2`}>
+                <div className="flex justify-between text-xs mb-2">
+                  <span className={`${isPositive ? 'text-green-400' : 'text-amber-400'} font-medium`}>Route Comparison</span>
+                  <span className={isPositive ? 'text-green-400' : 'text-amber-400'}>
+                    {isPositive
+                      ? `${fuelSavings.toFixed(1)}% fuel savings`
+                      : `${Math.abs(fuelSavings).toFixed(1)}% fuel increase`}
+                  </span>
+                </div>
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-gray-500">
+                      <th className="text-left font-normal pb-1"></th>
+                      <th className="text-right font-normal pb-1 text-blue-400">Baseline</th>
+                      <th className="text-right font-normal pb-1 text-green-400">Optimized</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-gray-300">
+                    <tr>
+                      <td>Distance</td>
+                      <td className="text-right">{baselineDist.toFixed(0)} nm</td>
+                      <td className="text-right">{(scenario?.total_distance_nm ?? optimizationResult.total_distance_nm).toFixed(0)} nm</td>
+                    </tr>
+                    <tr>
+                      <td>Fuel</td>
+                      <td className="text-right">{baselineFuel.toFixed(1)} mt</td>
+                      <td className="text-right">{(scenario?.total_fuel_mt ?? optimizationResult.total_fuel_mt).toFixed(1)} mt</td>
+                    </tr>
+                    <tr>
+                      <td>Time</td>
+                      <td className="text-right">{baselineTime.toFixed(1)} h</td>
+                      <td className="text-right">{(scenario?.total_time_hours ?? optimizationResult.total_time_hours).toFixed(1)} h</td>
+                    </tr>
+                    <tr>
+                      <td>Avg Speed</td>
+                      <td className="text-right">-</td>
+                      <td className="text-right">{(scenario?.avg_speed_kts ?? optimizationResult.avg_speed_kts).toFixed(1)} kts</td>
+                    </tr>
+                    <tr>
+                      <td>Waypoints</td>
+                      <td className="text-right">{waypoints.length}</td>
+                      <td className="text-right">{optimizationResult.waypoints.length}</td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="text-gray-500">
-                    <th className="text-left font-normal pb-1"></th>
-                    <th className="text-right font-normal pb-1 text-blue-400">Original</th>
-                    <th className="text-right font-normal pb-1 text-green-400">Optimized</th>
-                  </tr>
-                </thead>
-                <tbody className="text-gray-300">
-                  <tr>
-                    <td>Distance</td>
-                    <td className="text-right">{totalDistance.toFixed(0)} nm</td>
-                    <td className="text-right">{optimizationResult.total_distance_nm.toFixed(0)} nm</td>
-                  </tr>
-                  <tr>
-                    <td>Fuel</td>
-                    <td className="text-right">{optimizationResult.direct_fuel_mt.toFixed(1)} mt</td>
-                    <td className="text-right">{optimizationResult.total_fuel_mt.toFixed(1)} mt</td>
-                  </tr>
-                  <tr>
-                    <td>Time</td>
-                    <td className="text-right">{optimizationResult.direct_time_hours.toFixed(1)} h</td>
-                    <td className="text-right">{optimizationResult.total_time_hours.toFixed(1)} h</td>
-                  </tr>
-                  <tr>
-                    <td>Waypoints</td>
-                    <td className="text-right">{waypoints.length}</td>
-                    <td className="text-right">{optimizationResult.waypoints.length}</td>
-                  </tr>
-                </tbody>
-              </table>
+              <div className="flex gap-2">
+                <button
+                  onClick={onDismissOptimizedRoute}
+                  className="flex-1 py-2 text-sm border border-white/20 text-gray-300 rounded-lg hover:bg-white/5 transition-colors"
+                >
+                  Dismiss
+                </button>
+                <button
+                  onClick={onApplyOptimizedRoute}
+                  className="flex-1 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-500 transition-colors"
+                >
+                  Apply
+                </button>
+              </div>
             </div>
-            <div className="flex gap-2">
-              <button
-                onClick={onDismissOptimizedRoute}
-                className="flex-1 py-2 text-sm border border-white/20 text-gray-300 rounded-lg hover:bg-white/5 transition-colors"
-              >
-                Dismiss
-              </button>
-              <button
-                onClick={onApplyOptimizedRoute}
-                className="flex-1 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-500 transition-colors"
-              >
-                Apply
-              </button>
-            </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Saved Routes */}
         <div className="px-3 pb-3 border-t border-white/10 pt-2">

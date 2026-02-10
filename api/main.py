@@ -335,6 +335,12 @@ class OptimizationRequest(BaseModel):
     grid_resolution_deg: float = Field(0.5, ge=0.1, le=2.0, description="Grid resolution in degrees")
     max_time_factor: float = Field(1.15, ge=1.0, le=2.0,
         description="Max voyage time as multiple of direct time (1.15 = 15% longer allowed)")
+    # All user waypoints for multi-segment optimization (respects intermediate via-points)
+    route_waypoints: Optional[List[Position]] = None
+    # Baseline from voyage calculation (enables dual-strategy comparison)
+    baseline_fuel_mt: Optional[float] = None
+    baseline_time_hours: Optional[float] = None
+    baseline_distance_nm: Optional[float] = None
 
 
 class WeatherProvenanceModel(BaseModel):
@@ -376,6 +382,20 @@ class SafetySummary(BaseModel):
     max_accel_ms2: float
 
 
+class SpeedScenarioModel(BaseModel):
+    """One speed strategy applied to the optimized path."""
+    strategy: str
+    label: str
+    total_fuel_mt: float
+    total_time_hours: float
+    total_distance_nm: float
+    avg_speed_kts: float
+    speed_profile: List[float]
+    legs: List[OptimizationLegModel]
+    fuel_savings_pct: float
+    time_savings_pct: float
+
+
 class OptimizationResponse(BaseModel):
     """Route optimization result."""
     waypoints: List[Position]
@@ -399,6 +419,12 @@ class OptimizationResponse(BaseModel):
 
     # Safety assessment
     safety: Optional[SafetySummary] = None
+
+    # Speed strategy scenarios
+    scenarios: List[SpeedScenarioModel] = []
+    baseline_fuel_mt: Optional[float] = None
+    baseline_time_hours: Optional[float] = None
+    baseline_distance_nm: Optional[float] = None
 
     # Weather provenance
     weather_provenance: Optional[List[WeatherProvenanceModel]] = None
@@ -2987,6 +3013,11 @@ async def optimize_route(request: OptimizationRequest):
         # Select weather provider callable
         wx_provider = temporal_wx.get_weather if temporal_wx else grid_wx.get_weather
 
+        # Convert route_waypoints for multi-segment optimization
+        route_wps = None
+        if request.route_waypoints and len(request.route_waypoints) > 2:
+            route_wps = [(wp.lat, wp.lon) for wp in request.route_waypoints]
+
         result = route_optimizer.optimize_route(
             origin=(request.origin.lat, request.origin.lon),
             destination=(request.destination.lat, request.destination.lon),
@@ -2995,6 +3026,10 @@ async def optimize_route(request: OptimizationRequest):
             is_laden=request.is_laden,
             weather_provider=wx_provider,
             max_time_factor=request.max_time_factor,
+            baseline_time_hours=request.baseline_time_hours,
+            baseline_fuel_mt=request.baseline_fuel_mt,
+            baseline_distance_nm=request.baseline_distance_nm,
+            route_waypoints=route_wps,
         )
 
         # Format response
@@ -3041,6 +3076,41 @@ async def optimize_route(request: OptimizationRequest):
             max_accel_ms2=round(result.max_accel_ms2, 2),
         )
 
+        # Build speed strategy scenarios
+        scenario_models = []
+        for sc in result.scenarios:
+            sc_legs = []
+            for leg in sc.leg_details:
+                sc_legs.append(OptimizationLegModel(
+                    from_lat=leg['from'][0],
+                    from_lon=leg['from'][1],
+                    to_lat=leg['to'][0],
+                    to_lon=leg['to'][1],
+                    distance_nm=round(leg['distance_nm'], 2),
+                    bearing_deg=round(leg['bearing_deg'], 1),
+                    fuel_mt=round(leg['fuel_mt'], 3),
+                    time_hours=round(leg['time_hours'], 2),
+                    sog_kts=round(leg['sog_kts'], 1),
+                    stw_kts=round(leg.get('stw_kts', leg['sog_kts']), 1),
+                    wind_speed_ms=round(leg['wind_speed_ms'], 1),
+                    wave_height_m=round(leg['wave_height_m'], 1),
+                    safety_status=leg.get('safety_status'),
+                    roll_deg=round(leg['roll_deg'], 1) if leg.get('roll_deg') else None,
+                    pitch_deg=round(leg['pitch_deg'], 1) if leg.get('pitch_deg') else None,
+                ))
+            scenario_models.append(SpeedScenarioModel(
+                strategy=sc.strategy,
+                label=sc.label,
+                total_fuel_mt=round(sc.total_fuel_mt, 2),
+                total_time_hours=round(sc.total_time_hours, 2),
+                total_distance_nm=round(sc.total_distance_nm, 1),
+                avg_speed_kts=round(sc.avg_speed_kts, 1),
+                speed_profile=[round(s, 1) for s in sc.speed_profile],
+                legs=sc_legs,
+                fuel_savings_pct=round(sc.fuel_savings_pct, 1),
+                time_savings_pct=round(sc.time_savings_pct, 1),
+            ))
+
         return OptimizationResponse(
             waypoints=waypoints,
             total_fuel_mt=round(result.total_fuel_mt, 2),
@@ -3055,6 +3125,10 @@ async def optimize_route(request: OptimizationRequest):
             avg_speed_kts=round(result.avg_speed_kts, 1),
             variable_speed_enabled=result.variable_speed_enabled,
             safety=safety_summary,
+            scenarios=scenario_models,
+            baseline_fuel_mt=round(result.baseline_fuel_mt, 2) if result.baseline_fuel_mt else None,
+            baseline_time_hours=round(result.baseline_time_hours, 2) if result.baseline_time_hours else None,
+            baseline_distance_nm=round(result.baseline_distance_nm, 1) if result.baseline_distance_nm else None,
             weather_provenance=provenance_models,
             temporal_weather=used_temporal,
             optimization_target=request.optimization_target,

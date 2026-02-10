@@ -297,6 +297,11 @@ export default function HomePage() {
     setDisplayedAnalysisId(null);
   };
 
+  // Get displayed analysis for route indicator and optimization baseline
+  const displayedAnalysis = displayedAnalysisId
+    ? analyses.find(a => a.id === displayedAnalysisId)
+    : null;
+
   // Calculate voyage
   const handleCalculate = async () => {
     if (waypoints.length < 2) {
@@ -358,6 +363,10 @@ export default function HomePage() {
         optimization_target: 'fuel',
         grid_resolution_deg: 0.5,
         max_time_factor: 1.15,
+        route_waypoints: waypoints.length > 2 ? waypoints : undefined,
+        baseline_fuel_mt: displayedAnalysis?.result.total_fuel_mt,
+        baseline_time_hours: displayedAnalysis?.result.total_time_hours,
+        baseline_distance_nm: displayedAnalysis?.result.total_distance_nm,
       });
 
       const dt = ((performance.now() - t0) / 1000).toFixed(1);
@@ -480,11 +489,6 @@ export default function HomePage() {
     return undefined;
   }, [weatherLayer]);
 
-  // Get displayed analysis for route indicator
-  const displayedAnalysis = displayedAnalysisId
-    ? analyses.find(a => a.id === displayedAnalysisId)
-    : null;
-
   return (
     <div className="min-h-screen bg-gradient-maritime">
       <Header />
@@ -545,6 +549,7 @@ export default function HomePage() {
               onRouteImport={handleRouteImport}
               onLoadRoute={handleLoadRoute}
               onClearRoute={handleClearRoute}
+              hasBaseline={!!displayedAnalysis}
               analysisFuel={displayedAnalysis?.result.total_fuel_mt}
               analysisTime={displayedAnalysis?.result.total_time_hours}
               analysisAvgSpeed={displayedAnalysis?.result.avg_sog_kts}
