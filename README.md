@@ -15,7 +15,10 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 
 ### Route Optimization
 - A\* grid-based pathfinding with configurable resolution (0.25-2.0 degrees)
+- Dual speed-strategy comparison: **Same Speed** (arrive earlier) vs **Match ETA** (maximize fuel savings)
+- Voyage baseline gating — requires voyage calculation before optimization
 - Variable speed optimization (6-18 knots per leg)
+- Turn-angle path smoothing to eliminate grid staircase artifacts
 - Seakeeping safety constraints (roll, pitch, acceleration limits)
 - Land avoidance via vectorized ocean mask (global-land-mask)
 - RTZ file import/export (IEC 61174 ECDIS standard)
@@ -29,7 +32,7 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 - Unified provider that blends forecast and climatology with smooth transitions
 - **Pre-ingested weather database** — grids compressed (zlib/float32) in PostgreSQL, served in milliseconds
 - **Redis shared cache** across all API workers (replaces per-worker in-memory dict)
-- 6-hourly background ingestion cycle with DB → live → synthetic fallback chain
+- 6-hourly background ingestion cycle (waves, currents, and wind) with DB → live → synthetic fallback chain
 - Synthetic data generator for testing and demos
 
 ### Monte Carlo Simulation
@@ -55,11 +58,15 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 - Continuous model recalibration from live data
 
 ### Web Interface
+- ECDIS-style map-centric layout with full-width chart and header dropdowns
 - Interactive Leaflet maps with weather overlays and route visualization
 - Wind particle animation layer (leaflet-velocity)
+- Windy-style wave crest rendering with click-to-inspect polar diagram popup
 - Forecast timeline with play/pause, speed control, and 5-day scrubbing
+- Dual-route display: original + optimized route shown simultaneously with comparison table
+- Strategy selector tabs (Same Speed / Match ETA) in route comparison panel
 - Voyage calculation with per-leg fuel, speed, and ETA breakdown
-- Vessel configuration and calibration panels
+- Consolidated vessel configuration, calibration, and fuel analysis page
 - CII compliance tracking and projections
 - Dark maritime theme, responsive design
 
@@ -347,6 +354,22 @@ The system ships with a default MR Product Tanker configuration:
 | Service Speed (laden / ballast) | 14.5 / 15.0 knots |
 
 ## Changelog
+
+### v0.0.6 — ECDIS UI Redesign & Dual Speed-Strategy Optimization
+
+Major UI overhaul to an ECDIS-style map-centric layout, enhanced weather visualization, and a formalized route optimization workflow with two speed strategies.
+
+- **ECDIS-style UI redesign** — remove left sidebar, full-width map with header icon dropdowns for voyage parameters and regulation zones; consolidated vessel config, calibration, and fuel analysis into single `/vessel` page; ECDIS-style route indicator panel (bottom-left overlay) and right slide-out analysis panel
+- **Wave crest rendering** — Windy-style curved arc crest marks perpendicular to wave propagation direction, opacity scaled by wave height; click-to-inspect popup with SVG polar diagram showing wind, swell, and windwave components on compass rose
+- **Dual speed-strategy display** — after A\* path optimization, present two scenarios: **Same Speed** (constant speed, arrive earlier, moderate fuel savings) and **Match ETA** (slow-steam to match baseline arrival time, maximum fuel savings); strategy selector tabs in route comparison panel
+- **Voyage baseline gating** — Optimize A\* button disabled until a voyage calculation baseline is computed, ensuring meaningful fuel/time comparisons
+- **Dual-route visualization** — display original (blue) and optimized (green dashed) routes simultaneously on map with comparison table (distance, fuel, time, waypoints) and Dismiss/Apply buttons
+- **GFS wind DB ingestion** — add wind grids to the 6-hourly ingestion cycle (41 GFS forecast hours, 3h steps); supplement temporal weather with live GFS wind when DB grids are unavailable
+- **Forecast data indicator** — timeline scrubber shows data source field for forecast frames
+- **Weather forecast coverage fix** — remove CMEMS bounding-box cap so downloads cover full viewport; dynamic subsampling keeps payload size manageable; cache staleness detection triggers fresh downloads (#21)
+- **Turn-angle path smoothing** — post-filter removes waypoints with <15° course change to eliminate grid staircase artifacts from A\* output
+- **A\* optimizer tuning** — increase time penalty (λ\_time from 0.5× to 1.0× service fuel) to prevent long zigzag detours; scale smoothing tolerance to grid resolution
+- **Data consistency fixes** — fuel savings display shows amber for increases; constant-speed baseline for fair comparison; SOG-based speed loss; temporal weather wired into voyage calculator; enforce max\_time\_factor on variable speed
 
 ### v0.0.5 — Weather Database Architecture
 
