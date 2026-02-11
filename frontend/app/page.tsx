@@ -371,10 +371,12 @@ export default function HomePage() {
     };
 
     try {
-      const [astarResult, visirResult] = await Promise.allSettled([
-        apiClient.optimizeRoute({ ...baseRequest, engine: 'astar' }),
-        apiClient.optimizeRoute({ ...baseRequest, engine: 'visir' }),
-      ]);
+      debugLog('info', 'ROUTE', 'Firing A* request...');
+      const astarPromise = apiClient.optimizeRoute({ ...baseRequest, engine: 'astar' });
+      debugLog('info', 'ROUTE', 'Firing VISIR request...');
+      const visirPromise = apiClient.optimizeRoute({ ...baseRequest, engine: 'visir' });
+
+      const [astarResult, visirResult] = await Promise.allSettled([astarPromise, visirPromise]);
 
       const astar = astarResult.status === 'fulfilled' ? astarResult.value : null;
       const visir = visirResult.status === 'fulfilled' ? visirResult.value : null;

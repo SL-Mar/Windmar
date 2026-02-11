@@ -156,8 +156,8 @@ class WeatherIngestionService:
         finally:
             conn.close()
 
-    def _has_multistep_run(self, source: str) -> bool:
-        """Check if a multi-timestep (>1 hour) complete run exists for source."""
+    def _has_multistep_run(self, source: str, max_age_hours: float = 12.0) -> bool:
+        """Check if a recent multi-timestep (>1 hour) complete run exists for source."""
         conn = self._get_conn()
         try:
             cur = conn.cursor()
@@ -165,8 +165,9 @@ class WeatherIngestionService:
                 """SELECT 1 FROM weather_forecast_runs
                    WHERE source = %s AND status = 'complete'
                      AND array_length(forecast_hours, 1) > 1
+                     AND ingested_at > NOW() - INTERVAL '%s hours'
                    LIMIT 1""",
-                (source,),
+                (source, max_age_hours),
             )
             return cur.fetchone() is not None
         except Exception:

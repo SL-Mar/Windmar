@@ -49,7 +49,7 @@ export default function MapOverlayControls({
     };
 
     fetchFreshness();
-    const interval = setInterval(fetchFreshness, 5 * 60 * 1000); // every 5 min
+    const interval = setInterval(fetchFreshness, 60 * 1000); // every 60s
     return () => clearInterval(interval);
   }, []);
 
