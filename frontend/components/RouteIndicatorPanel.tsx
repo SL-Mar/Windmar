@@ -5,7 +5,7 @@ import {
   PenLine, Upload, Navigation, Compass, Loader2, ChevronDown, ChevronUp,
   Trash2, MapPin, Play, Eye, EyeOff,
 } from 'lucide-react';
-import { Position, OptimizationResponse, SpeedScenario, EngineType, DualOptimizationResults, RouteVisibility } from '@/lib/api';
+import { Position, OptimizationResponse, SpeedScenario, EngineType, DualOptimizationResults, RouteVisibility, ParetoSolution } from '@/lib/api';
 import SavedRoutes from '@/components/SavedRoutes';
 import RouteImport from '@/components/RouteImport';
 
@@ -21,6 +21,7 @@ interface RouteIndicatorPanelProps {
   isOptimizing: boolean;
   onOptimize: () => void;
   optimizationResults: DualOptimizationResults;
+  paretoResults?: ParetoSolution[];
   onApplyOptimizedRoute: (engine: EngineType) => void;
   onDismissOptimizedRoute: () => void;
   routeVisibility: RouteVisibility;
@@ -36,6 +37,8 @@ interface RouteIndicatorPanelProps {
   analysisAvgSpeed?: number;
 }
 
+const WEIGHT_LABELS: Record<number, string> = { 0: 'Fuel', 0.5: 'Balanced', 1: 'Safety' };
+
 export default function RouteIndicatorPanel({
   waypoints,
   onWaypointsChange,
@@ -48,6 +51,7 @@ export default function RouteIndicatorPanel({
   isOptimizing,
   onOptimize,
   optimizationResults,
+  paretoResults = [],
   onApplyOptimizedRoute,
   onDismissOptimizedRoute,
   onRouteImport,
@@ -71,6 +75,8 @@ export default function RouteIndicatorPanel({
     : 0;
 
   const bearingLabel = bearingToCardinal(bearing);
+
+  const hasPareto = paretoResults.length > 0;
 
   // No route state
   if (waypoints.length === 0) {
@@ -242,8 +248,195 @@ export default function RouteIndicatorPanel({
           </button>
         </div>
 
-        {/* Dual-engine route comparison */}
-        {(optimizationResults.astar || optimizationResults.visir) && (() => {
+        {/* Pareto comparison table */}
+        {hasPareto && (optimizationResults.astar || optimizationResults.visir) && (() => {
+          const ref = optimizationResults.astar || optimizationResults.visir;
+          const baselineFuel = ref!.baseline_fuel_mt ?? ref!.direct_fuel_mt;
+          const baselineDist = ref!.baseline_distance_nm ?? totalDistance;
+          const baselineTime = ref!.baseline_time_hours ?? ref!.direct_time_hours;
+          const weights = [0.0, 0.5, 1.0];
+
+          const getResult = (engine: EngineType, w: number) =>
+            paretoResults.find(r => r.engine === engine && r.weight === w)?.result ?? null;
+
+          const fuelDelta = (r: OptimizationResponse | null) => {
+            if (!r || baselineFuel <= 0) return null;
+            return ((r.total_fuel_mt - baselineFuel) / baselineFuel) * 100;
+          };
+
+          const safetyIcon = (r: OptimizationResponse | null) => {
+            if (!r?.safety) return '-';
+            switch (r.safety.status) {
+              case 'dangerous': return '\u26A0\uFE0F';
+              case 'marginal': return '\u26A0\uFE0F';
+              case 'safe': return '\u2713';
+              default: return '-';
+            }
+          };
+
+          return (
+            <div className="px-3 pb-3">
+              {/* Visibility toggles */}
+              <div className="flex items-center gap-2 mb-2">
+                <button
+                  onClick={() => onRouteVisibilityChange({ ...routeVisibility, original: !routeVisibility.original })}
+                  className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
+                >
+                  {routeVisibility.original ? <Eye className="w-3.5 h-3.5 text-blue-400" /> : <EyeOff className="w-3.5 h-3.5" />}
+                  <span className="text-blue-400">Original</span>
+                </button>
+                {optimizationResults.astar && (
+                  <button
+                    onClick={() => onRouteVisibilityChange({ ...routeVisibility, astar: !routeVisibility.astar })}
+                    className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
+                  >
+                    {routeVisibility.astar ? <Eye className="w-3.5 h-3.5 text-green-400" /> : <EyeOff className="w-3.5 h-3.5" />}
+                    <span className="text-green-400">A*</span>
+                  </button>
+                )}
+                {optimizationResults.visir && (
+                  <button
+                    onClick={() => onRouteVisibilityChange({ ...routeVisibility, visir: !routeVisibility.visir })}
+                    className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
+                  >
+                    {routeVisibility.visir ? <Eye className="w-3.5 h-3.5 text-orange-400" /> : <EyeOff className="w-3.5 h-3.5" />}
+                    <span className="text-orange-400">VISIR</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="p-2 bg-white/5 border border-white/10 rounded-lg mb-2">
+                <div className="text-xs font-medium text-gray-300 mb-2">Route Comparison (Pareto)</div>
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-gray-500">
+                      <th className="text-left font-normal pb-1"></th>
+                      <th className="text-right font-normal pb-1 text-blue-400">Original</th>
+                      {weights.map(w => (
+                        <th key={w} className="text-right font-normal pb-1 text-gray-400">{WEIGHT_LABELS[w]}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="text-gray-300">
+                    {/* A* section */}
+                    {paretoResults.some(r => r.engine === 'astar' && r.result) && (
+                      <>
+                        <tr><td colSpan={2 + weights.length} className="pt-1.5 pb-0.5 font-medium text-green-400">A*</td></tr>
+                        <tr>
+                          <td className="pl-2">Dist</td>
+                          <td className="text-right">{baselineDist.toFixed(0)}</td>
+                          {weights.map(w => {
+                            const r = getResult('astar', w);
+                            return <td key={w} className="text-right">{r ? r.total_distance_nm.toFixed(0) : '-'}</td>;
+                          })}
+                        </tr>
+                        <tr>
+                          <td className="pl-2">Fuel</td>
+                          <td className="text-right">{baselineFuel.toFixed(1)}</td>
+                          {weights.map(w => {
+                            const r = getResult('astar', w);
+                            return <td key={w} className="text-right">{r ? r.total_fuel_mt.toFixed(1) : '-'}</td>;
+                          })}
+                        </tr>
+                        <tr className="font-medium">
+                          <td className="pl-2">Fuel &Delta;</td>
+                          <td className="text-right">-</td>
+                          {weights.map(w => {
+                            const d = fuelDelta(getResult('astar', w));
+                            if (d === null) return <td key={w} className="text-right">-</td>;
+                            return (
+                              <td key={w} className={`text-right ${d < 0 ? 'text-green-400' : d > 0 ? 'text-amber-400' : 'text-gray-300'}`}>
+                                {d > 0 ? '+' : ''}{d.toFixed(1)}%
+                              </td>
+                            );
+                          })}
+                        </tr>
+                        <tr>
+                          <td className="pl-2">Safety</td>
+                          <td className="text-right">-</td>
+                          {weights.map(w => (
+                            <td key={w} className="text-right">{safetyIcon(getResult('astar', w))}</td>
+                          ))}
+                        </tr>
+                      </>
+                    )}
+                    {/* VISIR section */}
+                    {paretoResults.some(r => r.engine === 'visir' && r.result) && (
+                      <>
+                        <tr><td colSpan={2 + weights.length} className="pt-2 pb-0.5 font-medium text-orange-400">VISIR</td></tr>
+                        <tr>
+                          <td className="pl-2">Dist</td>
+                          <td className="text-right">{baselineDist.toFixed(0)}</td>
+                          {weights.map(w => {
+                            const r = getResult('visir', w);
+                            return <td key={w} className="text-right">{r ? r.total_distance_nm.toFixed(0) : '-'}</td>;
+                          })}
+                        </tr>
+                        <tr>
+                          <td className="pl-2">Fuel</td>
+                          <td className="text-right">{baselineFuel.toFixed(1)}</td>
+                          {weights.map(w => {
+                            const r = getResult('visir', w);
+                            return <td key={w} className="text-right">{r ? r.total_fuel_mt.toFixed(1) : '-'}</td>;
+                          })}
+                        </tr>
+                        <tr className="font-medium">
+                          <td className="pl-2">Fuel &Delta;</td>
+                          <td className="text-right">-</td>
+                          {weights.map(w => {
+                            const d = fuelDelta(getResult('visir', w));
+                            if (d === null) return <td key={w} className="text-right">-</td>;
+                            return (
+                              <td key={w} className={`text-right ${d < 0 ? 'text-green-400' : d > 0 ? 'text-amber-400' : 'text-gray-300'}`}>
+                                {d > 0 ? '+' : ''}{d.toFixed(1)}%
+                              </td>
+                            );
+                          })}
+                        </tr>
+                        <tr>
+                          <td className="pl-2">Safety</td>
+                          <td className="text-right">-</td>
+                          {weights.map(w => (
+                            <td key={w} className="text-right">{safetyIcon(getResult('visir', w))}</td>
+                          ))}
+                        </tr>
+                      </>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Action buttons */}
+              <div className="flex gap-2">
+                <button
+                  onClick={onDismissOptimizedRoute}
+                  className="py-2 px-3 text-xs border border-white/20 text-gray-300 rounded-lg hover:bg-white/5 transition-colors"
+                >
+                  Dismiss
+                </button>
+                {optimizationResults.astar && (
+                  <button
+                    onClick={() => onApplyOptimizedRoute('astar')}
+                    className="flex-1 py-2 text-xs bg-green-600 text-white rounded-lg hover:bg-green-500 transition-colors"
+                  >
+                    Apply A*
+                  </button>
+                )}
+                {optimizationResults.visir && (
+                  <button
+                    onClick={() => onApplyOptimizedRoute('visir')}
+                    className="flex-1 py-2 text-xs bg-orange-600 text-white rounded-lg hover:bg-orange-500 transition-colors"
+                  >
+                    Apply VISIR
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Standard dual-engine comparison (non-Pareto) */}
+        {!hasPareto && (optimizationResults.astar || optimizationResults.visir) && (() => {
           const astar = optimizationResults.astar;
           const visir = optimizationResults.visir;
           // Use baseline from whichever result is available
@@ -333,7 +526,7 @@ export default function RouteIndicatorPanel({
                         </td>
                       )}
                       {visir && (
-                        <td className={`text-right ${(visirFuelChange as number) < 0 ? 'text-orange-400' : 'text-amber-400'}`}>
+                        <td className={`text-right ${(visirFuelChange as number) < 0 ? 'text-green-400' : 'text-amber-400'}`}>
                           {(visirFuelChange as number) > 0 ? '+' : ''}{(visirFuelChange as number).toFixed(1)}%
                         </td>
                       )}

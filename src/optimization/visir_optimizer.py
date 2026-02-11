@@ -121,6 +121,7 @@ class VisirOptimizer(BaseOptimizer):
         self.optimization_target = optimization_target
         self.enforce_safety = enforce_safety
         self.enforce_zones = enforce_zones
+        self.safety_weight: float = 0.0  # 0=pure fuel, 1=full safety penalties
 
         self.safety_constraints = safety_constraints or create_default_safety_constraints(
             lpp=self.vessel_model.specs.lpp,
@@ -578,6 +579,7 @@ class VisirOptimizer(BaseOptimizer):
 
         for speed_kts in np.linspace(min_spd, max_spd, self.SPEED_STEPS):
             # Safety gate (voluntary speed reduction)
+            safety_cost = 1.0
             if self.enforce_safety and weather.sig_wave_height_m > 0:
                 wp = self.estimate_wave_period(weather)
                 sf = self.safety_constraints.get_safety_cost_factor(
@@ -589,7 +591,10 @@ class VisirOptimizer(BaseOptimizer):
                     is_laden=is_laden,
                 )
                 if sf == float("inf"):
-                    continue  # unsafe at this speed
+                    continue  # unsafe at this speed — hard constraint always
+                # Soft safety penalty dampened by safety_weight
+                if self.safety_weight > 0 and sf > 1.0:
+                    safety_cost = sf ** self.safety_weight
 
             sog = speed_kts + ce
             if sog <= 0.5:
@@ -606,9 +611,9 @@ class VisirOptimizer(BaseOptimizer):
             fuel = result["fuel_mt"]
 
             if self.optimization_target == "fuel":
-                score = (fuel + lambda_time * hours) * zone_factor
+                score = (fuel + lambda_time * hours) * zone_factor * safety_cost
             else:
-                score = hours * zone_factor
+                score = hours * zone_factor * safety_cost
 
             if best is None or score < best[0]:
                 best = (score, hours, float(speed_kts))

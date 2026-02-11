@@ -298,6 +298,8 @@ export interface OptimizationRequest {
   baseline_distance_nm?: number;
   // Engine selection (astar or visir)
   engine?: 'astar' | 'visir';
+  // Safety weight: 0=fuel optimal, 1=safety priority
+  safety_weight?: number;
 }
 
 export interface WeatherProvenance {
@@ -393,6 +395,16 @@ export interface RouteVisibility {
   original: boolean;
   astar: boolean;
   visir: boolean;
+}
+
+// Optimization strategy modes
+export type OptimizationStrategy = 'fuel' | 'pareto' | 'safety';
+
+// Pareto result: one engine run at a specific safety weight
+export interface ParetoSolution {
+  engine: EngineType;
+  weight: number;
+  result: OptimizationResponse | null;
 }
 
 // Vessel types

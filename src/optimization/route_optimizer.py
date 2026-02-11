@@ -127,6 +127,7 @@ class RouteOptimizer(BaseOptimizer):
         self.enforce_safety = enforce_safety
         self.enforce_zones = enforce_zones
         self.variable_speed = variable_speed
+        self.safety_weight: float = 0.0  # 0=pure fuel, 1=full safety penalties
 
         # Safety constraints (seakeeping model)
         self.safety_constraints = safety_constraints or create_default_safety_constraints(
@@ -640,8 +641,16 @@ class RouteOptimizer(BaseOptimizer):
                 return float('inf'), float('inf')  # Exclusion zone - forbidden
             zone_factor = zone_penalty
 
+        # Dampen safety factor by safety_weight
+        if safety_factor == float('inf'):
+            dampened_sf = float('inf')  # hard constraint always applies
+        elif self.safety_weight > 0 and safety_factor > 1.0:
+            dampened_sf = safety_factor ** self.safety_weight
+        else:
+            dampened_sf = 1.0
+
         # Combined cost factor
-        total_factor = safety_factor * zone_factor
+        total_factor = dampened_sf * zone_factor
 
         # Return cost based on optimization target
         if self.optimization_target == "time":
@@ -754,7 +763,13 @@ class RouteOptimizer(BaseOptimizer):
                 )
                 if safety_factor == float('inf'):
                     continue  # Skip dangerous speeds
-                score *= safety_factor
+                # Dampen safety penalty by safety_weight
+                if self.safety_weight > 0 and safety_factor > 1.0:
+                    score *= safety_factor ** self.safety_weight
+                elif self.safety_weight <= 0:
+                    pass  # no penalty
+                else:
+                    score *= safety_factor
 
             results.append((speed_kts, fuel_mt, time_hours, score))
 

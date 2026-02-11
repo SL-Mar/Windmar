@@ -344,6 +344,8 @@ class OptimizationRequest(BaseModel):
     baseline_fuel_mt: Optional[float] = None
     baseline_time_hours: Optional[float] = None
     baseline_distance_nm: Optional[float] = None
+    # Safety weight: 0.0 = pure fuel optimization, 1.0 = full safety penalties
+    safety_weight: float = Field(0.0, ge=0.0, le=1.0, description="Safety penalty weight: 0=fuel optimal, 1=safety priority")
 
 
 class WeatherProvenanceModel(BaseModel):
@@ -2956,6 +2958,7 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
         else request.grid_resolution_deg
     )
     active_optimizer.optimization_target = request.optimization_target
+    active_optimizer.safety_weight = request.safety_weight
 
     try:
         # ── Temporal weather provisioning (DB-first) ──────────────────

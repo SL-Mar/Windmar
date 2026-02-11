@@ -7,7 +7,7 @@ import MapOverlayControls from '@/components/MapOverlayControls';
 import RouteIndicatorPanel from '@/components/RouteIndicatorPanel';
 import AnalysisSlidePanel from '@/components/AnalysisSlidePanel';
 import { useVoyage } from '@/components/VoyageContext';
-import { apiClient, Position, WindFieldData, WaveFieldData, VelocityData, VoyageResponse, OptimizationResponse, CreateZoneRequest, WaveForecastFrames, EngineType, DualOptimizationResults, RouteVisibility } from '@/lib/api';
+import { apiClient, Position, WindFieldData, WaveFieldData, VelocityData, VoyageResponse, OptimizationResponse, CreateZoneRequest, WaveForecastFrames, EngineType, DualOptimizationResults, RouteVisibility, ParetoSolution } from '@/lib/api';
 import { getAnalyses, saveAnalysis, deleteAnalysis, updateAnalysisMonteCarlo, AnalysisEntry } from '@/lib/analysisStorage';
 import { debugLog } from '@/lib/debugLog';
 import DebugConsole from '@/components/DebugConsole';
@@ -18,7 +18,7 @@ type WeatherLayer = 'wind' | 'waves' | 'currents' | 'none';
 
 export default function HomePage() {
   // Voyage context (shared with header dropdowns)
-  const { calmSpeed, isLaden, useWeather, zoneVisibility, isDrawingZone, setIsDrawingZone } = useVoyage();
+  const { calmSpeed, isLaden, useWeather, optimizationStrategy, zoneVisibility, isDrawingZone, setIsDrawingZone } = useVoyage();
 
   // Route state
   const [waypoints, setWaypoints] = useState<Position[]>([]);
@@ -30,6 +30,7 @@ export default function HomePage() {
 
   // Optimization (dual engine)
   const [optimizationResults, setOptimizationResults] = useState<DualOptimizationResults>({ astar: null, visir: null });
+  const [paretoResults, setParetoResults] = useState<ParetoSolution[]>([]);
   const [routeVisibility, setRouteVisibility] = useState<RouteVisibility>({ original: true, astar: true, visir: true });
   const [isOptimizing, setIsOptimizing] = useState(false);
 
@@ -352,9 +353,10 @@ export default function HomePage() {
 
     setIsOptimizing(true);
     setOptimizationResults({ astar: null, visir: null });
+    setParetoResults([]);
 
     const t0 = performance.now();
-    debugLog('info', 'ROUTE', `Dual optimize: ${waypoints[0].lat.toFixed(2)},${waypoints[0].lon.toFixed(2)} → ${waypoints[waypoints.length-1].lat.toFixed(2)},${waypoints[waypoints.length-1].lon.toFixed(2)}, speed=${calmSpeed}kts`);
+    debugLog('info', 'ROUTE', `Dual optimize (${optimizationStrategy}): ${waypoints[0].lat.toFixed(2)},${waypoints[0].lon.toFixed(2)} → ${waypoints[waypoints.length-1].lat.toFixed(2)},${waypoints[waypoints.length-1].lon.toFixed(2)}, speed=${calmSpeed}kts`);
 
     const baseRequest = {
       origin: waypoints[0],
@@ -371,28 +373,55 @@ export default function HomePage() {
     };
 
     try {
-      debugLog('info', 'ROUTE', 'Firing A* request...');
-      const astarPromise = apiClient.optimizeRoute({ ...baseRequest, engine: 'astar' });
-      debugLog('info', 'ROUTE', 'Firing VISIR request...');
-      const visirPromise = apiClient.optimizeRoute({ ...baseRequest, engine: 'visir' });
+      if (optimizationStrategy === 'pareto') {
+        // Pareto mode: 2 engines x 3 weights = 6 parallel requests
+        const weights = [0.0, 0.5, 1.0];
+        const promises: Promise<ParetoSolution>[] = [];
+        for (const engine of ['astar', 'visir'] as const) {
+          for (const w of weights) {
+            debugLog('info', 'ROUTE', `Firing ${engine} w=${w}...`);
+            promises.push(
+              apiClient.optimizeRoute({ ...baseRequest, engine, safety_weight: w })
+                .then(r => ({ engine, weight: w, result: r }))
+                .catch(() => ({ engine, weight: w, result: null }))
+            );
+          }
+        }
+        const results = await Promise.all(promises);
+        const dt = ((performance.now() - t0) / 1000).toFixed(1);
+        const ok = results.filter(r => r.result).length;
+        debugLog('info', 'ROUTE', `Pareto done in ${dt}s: ${ok}/6 succeeded`);
+        setParetoResults(results);
 
-      const [astarResult, visirResult] = await Promise.allSettled([astarPromise, visirPromise]);
+        // Also set dual results using w=0 (fuel optimal) for map display
+        const astarFuel = results.find(r => r.engine === 'astar' && r.weight === 0.0)?.result ?? null;
+        const visirFuel = results.find(r => r.engine === 'visir' && r.weight === 0.0)?.result ?? null;
+        setOptimizationResults({ astar: astarFuel, visir: visirFuel });
+      } else {
+        // Fuel or Safety: single weight, dual engine
+        const sw = optimizationStrategy === 'fuel' ? 0.0 : 1.0;
+        debugLog('info', 'ROUTE', `Firing A* (sw=${sw})...`);
+        const astarPromise = apiClient.optimizeRoute({ ...baseRequest, engine: 'astar', safety_weight: sw });
+        debugLog('info', 'ROUTE', `Firing VISIR (sw=${sw})...`);
+        const visirPromise = apiClient.optimizeRoute({ ...baseRequest, engine: 'visir', safety_weight: sw });
 
-      const astar = astarResult.status === 'fulfilled' ? astarResult.value : null;
-      const visir = visirResult.status === 'fulfilled' ? visirResult.value : null;
+        const [astarResult, visirResult] = await Promise.allSettled([astarPromise, visirPromise]);
 
-      if (astarResult.status === 'rejected') {
-        debugLog('error', 'ROUTE', `A* failed: ${astarResult.reason}`);
+        const astar = astarResult.status === 'fulfilled' ? astarResult.value : null;
+        const visir = visirResult.status === 'fulfilled' ? visirResult.value : null;
+
+        if (astarResult.status === 'rejected') {
+          debugLog('error', 'ROUTE', `A* failed: ${astarResult.reason}`);
+        }
+        if (visirResult.status === 'rejected') {
+          debugLog('error', 'ROUTE', `VISIR failed: ${visirResult.reason}`);
+        }
+
+        const dt = ((performance.now() - t0) / 1000).toFixed(1);
+        debugLog('info', 'ROUTE', `Dual optimize done in ${dt}s: A*=${astar ? astar.waypoints.length + 'wps' : 'failed'}, VISIR=${visir ? visir.waypoints.length + 'wps' : 'failed'}`);
+
+        setOptimizationResults({ astar, visir });
       }
-      if (visirResult.status === 'rejected') {
-        debugLog('error', 'ROUTE', `VISIR failed: ${visirResult.reason}`);
-      }
-
-      const dt = ((performance.now() - t0) / 1000).toFixed(1);
-      debugLog('info', 'ROUTE', `Dual optimize done in ${dt}s: A*=${astar ? astar.waypoints.length + 'wps' : 'failed'}, VISIR=${visir ? visir.waypoints.length + 'wps' : 'failed'}`);
-
-      setOptimizationResults({ astar, visir });
-
     } catch (error) {
       debugLog('error', 'ROUTE', `Dual optimization failed: ${error}`);
     } finally {
@@ -406,6 +435,7 @@ export default function HomePage() {
     if (result) {
       setWaypoints(result.waypoints);
       setOptimizationResults({ astar: null, visir: null });
+      setParetoResults([]);
       setDisplayedAnalysisId(null);
     }
   };
@@ -413,6 +443,7 @@ export default function HomePage() {
   // Dismiss optimized routes (keep original)
   const dismissOptimizedRoute = () => {
     setOptimizationResults({ astar: null, visir: null });
+    setParetoResults([]);
   };
 
   // Save new zone
@@ -549,6 +580,7 @@ export default function HomePage() {
               isOptimizing={isOptimizing}
               onOptimize={handleOptimize}
               optimizationResults={optimizationResults}
+              paretoResults={paretoResults}
               onApplyOptimizedRoute={applyOptimizedRoute}
               onDismissOptimizedRoute={dismissOptimizedRoute}
               onRouteImport={handleRouteImport}

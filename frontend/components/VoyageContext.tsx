@@ -1,6 +1,7 @@
 'use client';
 
 import { createContext, useContext, useState, ReactNode } from 'react';
+import type { OptimizationStrategy } from '@/lib/api';
 
 const ZONE_TYPES = ['eca', 'seca', 'hra', 'tss', 'vts', 'ice', 'canal', 'environmental', 'exclusion'] as const;
 
@@ -12,6 +13,10 @@ interface VoyageContextValue {
   setIsLaden: (v: boolean) => void;
   useWeather: boolean;
   setUseWeather: (v: boolean) => void;
+
+  // Optimization strategy
+  optimizationStrategy: OptimizationStrategy;
+  setOptimizationStrategy: (v: OptimizationStrategy) => void;
 
   // Zone visibility per type — all false by default
   zoneVisibility: Record<string, boolean>;
@@ -26,6 +31,7 @@ export function VoyageProvider({ children }: { children: ReactNode }) {
   const [calmSpeed, setCalmSpeed] = useState(14.5);
   const [isLaden, setIsLaden] = useState(true);
   const [useWeather, setUseWeather] = useState(true);
+  const [optimizationStrategy, setOptimizationStrategy] = useState<OptimizationStrategy>('fuel');
   const [isDrawingZone, setIsDrawingZone] = useState(false);
 
   const [zoneVisibility, setZoneVisibility] = useState<Record<string, boolean>>(() => {
@@ -44,6 +50,7 @@ export function VoyageProvider({ children }: { children: ReactNode }) {
         calmSpeed, setCalmSpeed,
         isLaden, setIsLaden,
         useWeather, setUseWeather,
+        optimizationStrategy, setOptimizationStrategy,
         zoneVisibility, setZoneTypeVisible,
         isDrawingZone, setIsDrawingZone,
       }}
