@@ -95,15 +95,16 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
-# Run the API server with production settings
-# - Workers based on CPU cores (2 * cores + 1 is recommended)
-# - Access log disabled for performance (structured logging handles this)
-# - Proxy headers enabled for load balancer compatibility
-CMD ["python", "-m", "uvicorn", "api.main:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8000", \
+# Run the API server with gunicorn + uvicorn workers
+# - gunicorn manages worker lifecycle with configurable timeout
+# - --timeout 120 allows long-running VISIR optimizations (~15-30s)
+# - uvicorn workers handle async endpoints (FastAPI)
+CMD ["gunicorn", "api.main:app", \
+     "--bind", "0.0.0.0:8000", \
      "--workers", "4", \
-     "--proxy-headers", \
+     "--worker-class", "uvicorn.workers.UvicornWorker", \
+     "--timeout", "120", \
+     "--graceful-timeout", "30", \
      "--forwarded-allow-ips", "*", \
-     "--access-log", \
+     "--access-logfile", "-", \
      "--log-level", "info"]

@@ -3046,6 +3046,7 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
                 calm_speed_kts=request.calm_speed_kts,
                 is_laden=request.is_laden,
                 weather_provider=wx_provider,
+                max_time_factor=request.max_time_factor,
             )
         else:
             result = active_optimizer.optimize_route(
