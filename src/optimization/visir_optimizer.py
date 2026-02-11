@@ -91,9 +91,9 @@ class VisirOptimizer(BaseOptimizer):
     """
 
     # Defaults
-    DEFAULT_RESOLUTION_DEG = 1.0
+    DEFAULT_RESOLUTION_DEG = 0.25
     DEFAULT_TIME_STEP_HOURS = 3.0   # temporal resolution of the graph
-    DEFAULT_MAX_NODES = 100_000
+    DEFAULT_MAX_NODES = 200_000
     SPEED_RANGE_KTS = (10.0, 18.0)  # practical speed range for graph exploration
     SPEED_STEPS = 3                  # candidate speeds per edge
 
@@ -468,9 +468,11 @@ class VisirOptimizer(BaseOptimizer):
 
                 nb_lat, nb_lon = grid[nb_rc]
 
-                # No edge land check for VISIR's coarse 1° grid — cells are
-                # ocean-only, and full path checks disconnect narrow passages.
-                # smooth_path handles minor coastal clips in post-processing.
+                # Edge land check — at 0.25° the grid is fine enough that
+                # is_path_clear won't disconnect valid passages.
+                if not is_path_clear(cur.lat, cur.lon, nb_lat, nb_lon):
+                    continue
+
                 spatial_edge = ((cur.row, cur.col), nb_rc)
                 if spatial_edge not in zone_cache:
                     if self.enforce_zones:

@@ -361,7 +361,7 @@ export default function HomePage() {
       calm_speed_kts: calmSpeed,
       is_laden: isLaden,
       optimization_target: 'fuel' as const,
-      grid_resolution_deg: 0.5,
+      grid_resolution_deg: 0.1,
       max_time_factor: 1.15,
       route_waypoints: waypoints.length > 2 ? waypoints : undefined,
       baseline_fuel_mt: displayedAnalysis?.result.total_fuel_mt,

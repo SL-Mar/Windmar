@@ -83,8 +83,8 @@ class RouteOptimizer(BaseOptimizer):
     """
 
     # Default grid settings
-    DEFAULT_RESOLUTION_DEG = 0.5  # Grid cell size in degrees (~30nm at equator)
-    DEFAULT_MAX_CELLS = 50000  # Maximum cells to explore before giving up
+    DEFAULT_RESOLUTION_DEG = 0.1  # Grid cell size in degrees (~6nm at equator)
+    DEFAULT_MAX_CELLS = 200_000  # Maximum cells to explore before giving up
 
     # Neighbor directions (8-connected grid)
     # (row_delta, col_delta) for N, NE, E, SE, S, SW, W, NW

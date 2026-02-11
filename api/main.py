@@ -334,7 +334,7 @@ class OptimizationRequest(BaseModel):
     is_laden: bool = True
     departure_time: Optional[datetime] = None
     optimization_target: str = Field("fuel", description="Minimize 'fuel' or 'time'")
-    grid_resolution_deg: float = Field(0.5, ge=0.1, le=2.0, description="Grid resolution in degrees")
+    grid_resolution_deg: float = Field(0.1, ge=0.05, le=2.0, description="Grid resolution in degrees")
     max_time_factor: float = Field(1.15, ge=1.0, le=2.0,
         description="Max voyage time as multiple of direct time (1.15 = 15% longer allowed)")
     engine: str = Field("astar", description="Optimization engine: 'astar' (A* pathfinding) or 'visir' (VISIR graph-based Dijkstra)")
@@ -2928,9 +2928,9 @@ async def optimize_route(request: OptimizationRequest):
     Minimizes fuel consumption (or time) by routing around adverse weather.
 
     Grid resolution affects accuracy vs computation time:
-    - 0.25° = ~15nm cells, high accuracy, slower
-    - 0.5° = ~30nm cells, good balance (default)
-    - 1.0° = ~60nm cells, fast, less precise
+    - 0.1° = ~6nm cells, high accuracy, best land avoidance (default for A*)
+    - 0.25° = ~15nm cells, good balance (default for VISIR)
+    - 0.5° = ~30nm cells, faster, less precise
     """
     # Run the entire optimization in a thread so the event loop stays
     # responsive (weather provisioning + VISIR can take 30s+, and an
@@ -2951,10 +2951,10 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
         active_optimizer = visir_optimizer
     else:
         active_optimizer = route_optimizer
-    # VISIR uses coarser resolution (1°) — 0.5° grids have connectivity gaps
-    # around narrow passages (e.g., Brittany/English Channel) at 8-connected
+    # VISIR uses coarser resolution than A* (0.25° vs 0.1°) for performance;
+    # at 0.25° the edge land checks keep routes off land reliably.
     active_optimizer.resolution_deg = (
-        max(request.grid_resolution_deg, 1.0) if engine_name == "visir"
+        max(request.grid_resolution_deg, 0.25) if engine_name == "visir"
         else request.grid_resolution_deg
     )
     active_optimizer.optimization_target = request.optimization_target
@@ -3172,7 +3172,7 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
             weather_provenance=provenance_models,
             temporal_weather=used_temporal,
             optimization_target=request.optimization_target,
-            grid_resolution_deg=request.grid_resolution_deg,
+            grid_resolution_deg=active_optimizer.resolution_deg,
             cells_explored=result.cells_explored,
             optimization_time_ms=round(result.optimization_time_ms, 1),
         )
