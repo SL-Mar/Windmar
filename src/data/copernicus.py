@@ -932,7 +932,7 @@ class CopernicusDataProvider:
     # ------------------------------------------------------------------
     # Sea Ice Concentration from CMEMS
     # ------------------------------------------------------------------
-    CMEMS_ICE_DATASET = "cmems_mod_glo_phy_anfc_0.083deg_PT1H-m"
+    CMEMS_ICE_DATASET = "cmems_mod_glo_phy_anfc_0.083deg_P1D-m"
 
     def fetch_ice_data(
         self,
