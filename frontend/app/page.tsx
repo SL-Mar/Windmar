@@ -36,6 +36,8 @@ export default function HomePage() {
   const [weatherLayer, setWeatherLayer] = useState<WeatherLayer>('none');
   const [windData, setWindData] = useState<WindFieldData | null>(null);
   const windDataBaseRef = useRef<WindFieldData | null>(null); // preserve ocean mask for forecast
+  const windFieldCacheRef = useRef<Record<string, WindFieldData>>({}); // per-frame cache
+  const windFieldCacheVersionRef = useRef<string>(''); // invalidated on new GFS run
   const [waveData, setWaveData] = useState<WaveFieldData | null>(null);
   const [windVelocityData, setWindVelocityData] = useState<VelocityData[] | null>(null);
   const [currentVelocityData, setCurrentVelocityData] = useState<VelocityData[] | null>(null);
@@ -208,45 +210,50 @@ export default function HomePage() {
     if (data && data.length >= 2) {
       setWindVelocityData(data);
 
-      // Reconstruct WindFieldData from velocity frame so heatmap updates too
+      // Lazy-cache: build WindFieldData once per (run, hour), reuse on loops
       const hdr = data[0].header;
-      const nx = hdr.nx;
-      const ny = hdr.ny;
-      const lats: number[] = [];
-      const lons: number[] = [];
-      for (let j = 0; j < ny; j++) lats.push(hdr.la1 - j * hdr.dy);
-      for (let i = 0; i < nx; i++) lons.push(hdr.lo1 + i * hdr.dx);
-
-      const u2d: number[][] = [];
-      const v2d: number[][] = [];
-      for (let j = 0; j < ny; j++) {
-        const uRow: number[] = [];
-        const vRow: number[] = [];
-        for (let i = 0; i < nx; i++) {
-          uRow.push(data[0].data[j * nx + i] ?? 0);
-          vRow.push(data[1].data[j * nx + i] ?? 0);
-        }
-        u2d.push(uRow);
-        v2d.push(vRow);
+      const version = hdr.refTime || '';
+      if (version !== windFieldCacheVersionRef.current) {
+        windFieldCacheRef.current = {};
+        windFieldCacheVersionRef.current = version;
       }
-
-      const base = windDataBaseRef.current;
-      setWindData({
-        parameter: 'wind',
-        time: hdr.refTime || '',
-        bbox: {
-          lat_min: Math.min(hdr.la1, hdr.la2),
-          lat_max: Math.max(hdr.la1, hdr.la2),
-          lon_min: hdr.lo1,
-          lon_max: hdr.lo2,
-        },
-        resolution: hdr.dx,
-        nx, ny, lats, lons,
-        u: u2d, v: v2d,
-        ocean_mask: base?.ocean_mask,
-        ocean_mask_lats: base?.ocean_mask_lats,
-        ocean_mask_lons: base?.ocean_mask_lons,
-      });
+      const key = String(hour);
+      let field = windFieldCacheRef.current[key];
+      if (!field) {
+        const nx = hdr.nx;
+        const ny = hdr.ny;
+        const lats = Array.from({ length: ny }, (_, j) => hdr.la1 - j * hdr.dy);
+        const lons = Array.from({ length: nx }, (_, i) => hdr.lo1 + i * hdr.dx);
+        const flatU = data[0].data;
+        const flatV = data[1].data;
+        const u2d = Array.from({ length: ny }, (_, j) => {
+          const off = j * nx;
+          return Array.from({ length: nx }, (_, i) => flatU[off + i] ?? 0);
+        });
+        const v2d = Array.from({ length: ny }, (_, j) => {
+          const off = j * nx;
+          return Array.from({ length: nx }, (_, i) => flatV[off + i] ?? 0);
+        });
+        const base = windDataBaseRef.current;
+        field = {
+          parameter: 'wind',
+          time: version,
+          bbox: {
+            lat_min: Math.min(hdr.la1, hdr.la2),
+            lat_max: Math.max(hdr.la1, hdr.la2),
+            lon_min: hdr.lo1,
+            lon_max: hdr.lo2,
+          },
+          resolution: hdr.dx,
+          nx, ny, lats, lons,
+          u: u2d, v: v2d,
+          ocean_mask: base?.ocean_mask,
+          ocean_mask_lats: base?.ocean_mask_lats,
+          ocean_mask_lons: base?.ocean_mask_lons,
+        };
+        windFieldCacheRef.current[key] = field;
+      }
+      setWindData(field);
     } else if (hour === 0) {
       loadWeatherData();
     }

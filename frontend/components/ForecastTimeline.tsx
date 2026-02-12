@@ -96,8 +96,10 @@ export default function ForecastTimeline({
   const [iceFrameData, setIceFrameData] = useState<IceForecastFrames | null>(null);
   const iceFrameDataRef = useRef<IceForecastFrames | null>(null);
 
-  const playIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const playRafRef = useRef<number | null>(null);
+  const playLastTickRef = useRef(0);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sliderRafRef = useRef<number | null>(null);
 
   // Snapshot viewport bounds into a ref — never let it revert to null once set
   const boundsRef = useRef<ViewportBounds | null>(viewportBounds ?? null);
@@ -405,51 +407,69 @@ export default function ForecastTimeline({
   // ------------------------------------------------------------------
   // Play/pause
   // ------------------------------------------------------------------
+  // rAF-based playback — aligned with browser paint cycle so frame
+  // advances never fire while the previous render is still in progress.
   useEffect(() => {
     if (isPlaying && prefetchComplete && hasForecast) {
-      playIntervalRef.current = setInterval(() => {
-        setCurrentHour((prev) => {
-          const fallback = isIceMode ? DEFAULT_ICE_FORECAST_HOURS : DEFAULT_FORECAST_HOURS;
-          const hrs = availableHoursRef.current.length > 0 ? availableHoursRef.current : fallback;
-          const idx = hrs.indexOf(prev);
-          const nextIdx = idx >= 0 ? (idx + 1) % hrs.length : 0;
-          const nextHour = hrs[nextIdx];
+      const interval = SPEED_INTERVAL[speed];
+      playLastTickRef.current = performance.now();
 
-          if (isWindMode) {
-            const fd = windFramesRef.current[String(nextHour)] || null;
-            onForecastHourChange(nextHour, fd);
-          } else if (isWaveMode && onWaveForecastHourChange && waveFrameDataRef.current) {
-            onWaveForecastHourChange(nextHour, waveFrameDataRef.current);
-          } else if (isCurrentMode && onCurrentForecastHourChange && currentFrameDataRef.current) {
-            onCurrentForecastHourChange(nextHour, currentFrameDataRef.current);
-          } else if (isIceMode && onIceForecastHourChange && iceFrameDataRef.current) {
-            onIceForecastHourChange(nextHour, iceFrameDataRef.current);
-          }
-          return nextHour;
-        });
-      }, SPEED_INTERVAL[speed]);
+      const tick = () => {
+        const now = performance.now();
+        if (now - playLastTickRef.current >= interval) {
+          playLastTickRef.current = now;
+          setCurrentHour((prev) => {
+            const fallback = isIceMode ? DEFAULT_ICE_FORECAST_HOURS : DEFAULT_FORECAST_HOURS;
+            const hrs = availableHoursRef.current.length > 0 ? availableHoursRef.current : fallback;
+            const idx = hrs.indexOf(prev);
+            const nextIdx = idx >= 0 ? (idx + 1) % hrs.length : 0;
+            const nextHour = hrs[nextIdx];
+
+            if (isWindMode) {
+              onForecastHourChange(nextHour, windFramesRef.current[String(nextHour)] || null);
+            } else if (isWaveMode && onWaveForecastHourChange && waveFrameDataRef.current) {
+              onWaveForecastHourChange(nextHour, waveFrameDataRef.current);
+            } else if (isCurrentMode && onCurrentForecastHourChange && currentFrameDataRef.current) {
+              onCurrentForecastHourChange(nextHour, currentFrameDataRef.current);
+            } else if (isIceMode && onIceForecastHourChange && iceFrameDataRef.current) {
+              onIceForecastHourChange(nextHour, iceFrameDataRef.current);
+            }
+            return nextHour;
+          });
+        }
+        playRafRef.current = requestAnimationFrame(tick);
+      };
+
+      playRafRef.current = requestAnimationFrame(tick);
     }
-    return () => { if (playIntervalRef.current) { clearInterval(playIntervalRef.current); playIntervalRef.current = null; } };
+    return () => { if (playRafRef.current !== null) { cancelAnimationFrame(playRafRef.current); playRafRef.current = null; } };
   }, [isPlaying, speed, prefetchComplete, hasForecast, isWindMode, isWaveMode, isCurrentMode, isIceMode, onForecastHourChange, onWaveForecastHourChange, onCurrentForecastHourChange, onIceForecastHourChange]);
 
-  // Slider change
+  // Slider change — rAF-throttled so rapid scrubbing only renders once
+  // per browser frame.  The slider UI updates immediately (setCurrentHour)
+  // while heavy layer updates are deferred to the next paint.
   const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const hour = parseInt(e.target.value);
     setCurrentHour(hour);
-    if (isWindMode) {
-      onForecastHourChange(hour, windFrames[String(hour)] || null);
-    } else if (isWaveMode && onWaveForecastHourChange && waveFrameData) {
-      onWaveForecastHourChange(hour, waveFrameData);
-    } else if (isCurrentMode && onCurrentForecastHourChange && currentFrameData) {
-      onCurrentForecastHourChange(hour, currentFrameData);
-    } else if (isIceMode && onIceForecastHourChange && iceFrameData) {
-      onIceForecastHourChange(hour, iceFrameData);
-    }
+    if (sliderRafRef.current !== null) cancelAnimationFrame(sliderRafRef.current);
+    sliderRafRef.current = requestAnimationFrame(() => {
+      sliderRafRef.current = null;
+      if (isWindMode) {
+        onForecastHourChange(hour, windFrames[String(hour)] || null);
+      } else if (isWaveMode && onWaveForecastHourChange && waveFrameData) {
+        onWaveForecastHourChange(hour, waveFrameData);
+      } else if (isCurrentMode && onCurrentForecastHourChange && currentFrameData) {
+        onCurrentForecastHourChange(hour, currentFrameData);
+      } else if (isIceMode && onIceForecastHourChange && iceFrameData) {
+        onIceForecastHourChange(hour, iceFrameData);
+      }
+    });
   };
 
   // Close
   const handleClose = () => {
     setIsPlaying(false);
+    if (sliderRafRef.current !== null) { cancelAnimationFrame(sliderRafRef.current); sliderRafRef.current = null; }
     setCurrentHour(0);
     onForecastHourChange(0, null);
     if (onWaveForecastHourChange) onWaveForecastHourChange(0, null);

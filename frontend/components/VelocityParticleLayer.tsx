@@ -160,6 +160,7 @@ function VelocityParticleLayerInner({ data, type }: VelocityParticleLayerProps) 
     // ------------------------------------------------------------------
     let snap: HTMLCanvasElement | null = null;
     let fadeTimer: ReturnType<typeof setTimeout> | null = null;
+    let removeTimer: ReturnType<typeof setTimeout> | null = null;
 
     layer.setData = function (newData: any) {
       const ctx = this._context;
@@ -167,11 +168,12 @@ function VelocityParticleLayerInner({ data, type }: VelocityParticleLayerProps) 
         const canvas = ctx.canvas as HTMLCanvasElement;
         const parent = canvas.parentNode as HTMLElement | null;
         if (parent) {
-          // Cancel any pending fade-out (rapid scrubbing resets the clock)
+          // Cancel all pending timers (rapid scrubbing resets the clock)
           if (fadeTimer) { clearTimeout(fadeTimer); fadeTimer = null; }
+          if (removeTimer) { clearTimeout(removeTimer); removeTimer = null; }
 
-          // Create snapshot once from last visible frame
           if (!snap || !snap.parentNode) {
+            // Create snapshot once from last visible frame
             snap = document.createElement('canvas');
             snap.width = canvas.width;
             snap.height = canvas.height;
@@ -182,17 +184,25 @@ function VelocityParticleLayerInner({ data, type }: VelocityParticleLayerProps) 
             const sc = snap.getContext('2d');
             if (sc) sc.drawImage(canvas, 0, 0);
             parent.insertBefore(snap, canvas.nextSibling);
+          } else {
+            // Snapshot already visible (mid-fade or opaque) — reset to opaque
+            snap.style.transition = '';
+            snap.style.opacity = '1';
           }
 
-          // Schedule fade-out 350 ms after last setData
+          // Schedule fade-out 200 ms after last setData
           fadeTimer = setTimeout(() => {
+            fadeTimer = null;
             if (snap && snap.parentNode) {
               snap.style.transition = 'opacity 0.2s ease-out';
               snap.style.opacity = '0';
-              setTimeout(() => { snap?.remove(); snap = null; }, 220);
+              removeTimer = setTimeout(() => {
+                removeTimer = null;
+                snap?.remove();
+                snap = null;
+              }, 220);
             }
-            fadeTimer = null;
-          }, 350);
+          }, 200);
         }
       }
 
@@ -211,6 +221,7 @@ function VelocityParticleLayerInner({ data, type }: VelocityParticleLayerProps) 
 
     return () => {
       if (fadeTimer) clearTimeout(fadeTimer);
+      if (removeTimer) clearTimeout(removeTimer);
       if (snap) { snap.remove(); snap = null; }
       if (layerRef.current) {
         map.removeLayer(layerRef.current);

@@ -567,25 +567,35 @@ function WeatherGridLayerInner({
 
   // When data changes, repaint existing tile canvases in-place (no flash).
   // refreshTiles() reuses DOM elements — avoids the destroy/recreate cycle.
+  // rAF-throttled: multiple rapid data changes → one repaint per browser frame.
   const redrawCountRef = useRef(0);
+  const refreshRafRef = useRef<number | null>(null);
   useEffect(() => {
     if (layerRef.current) {
-      redrawCountRef.current++;
-      const isExt = mode === 'ice' || mode === 'visibility' || mode === 'sst' || mode === 'swell';
-      const sample = isExt && extendedData?.data
-        ? extendedData.data[Math.floor(extendedData.data.length / 2)]?.[0]?.toFixed(2) ?? '?'
-        : mode === 'waves' && waveData?.data
-          ? waveData.data[Math.floor(waveData.data.length / 2)]?.[0]?.toFixed(2) ?? '?'
-          : mode === 'wind' && windData?.u
-            ? windData.u[Math.floor(windData.u.length / 2)]?.[0]?.toFixed(2) ?? '?'
-            : '?';
-      debugLog('debug', 'RENDER', `GridLayer refresh #${redrawCountRef.current}: mode=${mode}, sample=${sample}`);
-      if (layerRef.current.refreshTiles) {
-        layerRef.current.refreshTiles();
-      } else {
-        layerRef.current.redraw();
-      }
+      if (refreshRafRef.current !== null) cancelAnimationFrame(refreshRafRef.current);
+      refreshRafRef.current = requestAnimationFrame(() => {
+        refreshRafRef.current = null;
+        if (!layerRef.current) return;
+        redrawCountRef.current++;
+        const isExt = mode === 'ice' || mode === 'visibility' || mode === 'sst' || mode === 'swell';
+        const sample = isExt && extendedData?.data
+          ? extendedData.data[Math.floor(extendedData.data.length / 2)]?.[0]?.toFixed(2) ?? '?'
+          : mode === 'waves' && waveData?.data
+            ? waveData.data[Math.floor(waveData.data.length / 2)]?.[0]?.toFixed(2) ?? '?'
+            : mode === 'wind' && windData?.u
+              ? windData.u[Math.floor(windData.u.length / 2)]?.[0]?.toFixed(2) ?? '?'
+              : '?';
+        debugLog('debug', 'RENDER', `GridLayer refresh #${redrawCountRef.current}: mode=${mode}, sample=${sample}`);
+        if (layerRef.current.refreshTiles) {
+          layerRef.current.refreshTiles();
+        } else {
+          layerRef.current.redraw();
+        }
+      });
     }
+    return () => {
+      if (refreshRafRef.current !== null) { cancelAnimationFrame(refreshRafRef.current); refreshRafRef.current = null; }
+    };
   }, [windData, waveData, extendedData, mode]);
 
   return null;
