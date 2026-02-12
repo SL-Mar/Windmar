@@ -1479,6 +1479,107 @@ _prefetch_running = False
 _prefetch_lock = None  # Will be a threading.Lock
 _last_wind_prefetch_run = None  # (run_date, run_hour) tuple from last successful prefetch
 
+# File-based cache for wind forecast frames (shared across gunicorn workers)
+_WIND_CACHE_DIR = Path("/tmp/windmar_wind_cache")
+_WIND_CACHE_DIR.mkdir(exist_ok=True)
+
+
+def _wind_cache_key(lat_min, lat_max, lon_min, lon_max):
+    return f"wind_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+
+
+def _wind_cache_get(cache_key: str) -> dict | None:
+    p = _WIND_CACHE_DIR / f"{cache_key}.json"
+    if p.exists():
+        try:
+            import json as _json
+            return _json.loads(p.read_text())
+        except Exception:
+            return None
+    return None
+
+
+def _wind_cache_put(cache_key: str, data: dict):
+    import json as _json
+    p = _WIND_CACHE_DIR / f"{cache_key}.json"
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(_json.dumps(data))
+    tmp.rename(p)  # atomic on same filesystem
+
+
+def _build_wind_frames(lat_min, lat_max, lon_min, lon_max, run_date, run_hour):
+    """Process all cached GRIB files into leaflet-velocity frames dict.
+
+    Called once after prefetch completes. Result is saved to file cache.
+    """
+    run_time = datetime.strptime(f"{run_date}{run_hour}", "%Y%m%d%H")
+    hours_status = gfs_provider.get_cached_forecast_hours(lat_min, lat_max, lon_min, lon_max, run_date, run_hour)
+
+    frames = {}
+    for h_info in hours_status:
+        if not h_info["cached"]:
+            continue
+        fh = h_info["forecast_hour"]
+        wind_data = gfs_provider.fetch_wind_data(lat_min, lat_max, lon_min, lon_max, forecast_hour=fh, run_date=run_date, run_hour=run_hour)
+        if wind_data is None:
+            continue
+
+        u_masked, v_masked = _apply_ocean_mask_velocity(
+            wind_data.u_component, wind_data.v_component,
+            wind_data.lats, wind_data.lons,
+        )
+        actual_lats = wind_data.lats
+        actual_lons = wind_data.lons
+        actual_dx = abs(float(actual_lons[1] - actual_lons[0])) if len(actual_lons) > 1 else 0.25
+        actual_dy = abs(float(actual_lats[1] - actual_lats[0])) if len(actual_lats) > 1 else 0.25
+
+        if len(actual_lats) > 1 and actual_lats[1] > actual_lats[0]:
+            u_ordered = u_masked[::-1]
+            v_ordered = v_masked[::-1]
+            lat_north = float(actual_lats[-1])
+            lat_south = float(actual_lats[0])
+        else:
+            u_ordered = u_masked
+            v_ordered = v_masked
+            lat_north = float(actual_lats[0])
+            lat_south = float(actual_lats[-1])
+
+        valid_time = run_time + timedelta(hours=fh)
+        header = {
+            "parameterCategory": 2,
+            "parameterNumber": 2,
+            "lo1": float(actual_lons[0]),
+            "la1": lat_north,
+            "lo2": float(actual_lons[-1]),
+            "la2": lat_south,
+            "dx": actual_dx,
+            "dy": actual_dy,
+            "nx": len(actual_lons),
+            "ny": len(actual_lats),
+            "refTime": valid_time.isoformat(),
+            "forecastHour": fh,
+        }
+        frames[str(fh)] = [
+            {"header": {**header, "parameterNumber": 2}, "data": u_ordered.flatten().tolist()},
+            {"header": {**header, "parameterNumber": 3}, "data": v_ordered.flatten().tolist()},
+        ]
+        logger.info(f"Wind frame f{fh:03d} processed ({len(actual_lats)}x{len(actual_lons)})")
+
+    result = {
+        "run_date": run_date,
+        "run_hour": run_hour,
+        "run_time": run_time.isoformat(),
+        "total_hours": len(GFSDataProvider.FORECAST_HOURS),
+        "cached_hours": len(frames),
+        "source": "gfs",
+        "frames": frames,
+    }
+
+    cache_key = _wind_cache_key(lat_min, lat_max, lon_min, lon_max)
+    _wind_cache_put(cache_key, result)
+    logger.info(f"Wind frames cache saved: {len(frames)} frames, key={cache_key}")
+    return result
+
 
 def _get_prefetch_lock():
     """Lazy-init thread lock for prefetch."""
@@ -1499,9 +1600,22 @@ async def api_get_forecast_status(
     """
     Get GFS forecast prefetch status.
 
-    Returns current GFS run info and which forecast hours are cached.
-    Falls back to the best available cached run if the latest GFS run has no data.
+    Checks the file cache first (instant). Falls back to scanning GRIB files.
     """
+    cache_key = _wind_cache_key(lat_min, lat_max, lon_min, lon_max)
+    cached = _wind_cache_get(cache_key)
+    if cached and not _prefetch_running:
+        cached_hours = len(cached.get("frames", {}))
+        return {
+            "run_date": cached["run_date"],
+            "run_hour": cached["run_hour"],
+            "total_hours": cached.get("total_hours", 41),
+            "cached_hours": cached_hours,
+            "complete": True,
+            "prefetch_running": False,
+        }
+
+    # No file cache — fall back to scanning GRIB files
     if _last_wind_prefetch_run:
         run_date, run_hour = _last_wind_prefetch_run
     else:
@@ -1509,7 +1623,6 @@ async def api_get_forecast_status(
     hours = gfs_provider.get_cached_forecast_hours(lat_min, lat_max, lon_min, lon_max, run_date, run_hour)
     cached_count = sum(1 for h in hours if h["cached"])
 
-    # Fallback: if chosen run has no cached files, scan for best available run
     if cached_count == 0 and not _prefetch_running:
         best = gfs_provider.find_best_cached_run(lat_min, lat_max, lon_min, lon_max)
         if best:
@@ -1523,9 +1636,8 @@ async def api_get_forecast_status(
         "run_hour": run_hour,
         "total_hours": total_count,
         "cached_hours": cached_count,
-        "complete": cached_count == total_count,
+        "complete": cached_count == total_count and not _prefetch_running,
         "prefetch_running": _prefetch_running,
-        "hours": hours,
     }
 
 
@@ -1563,7 +1675,9 @@ async def api_trigger_forecast_prefetch(
             _last_wind_prefetch_run = (run_date, run_hour)
             logger.info(f"GFS forecast prefetch started (run {run_date}/{run_hour}z)")
             gfs_provider.prefetch_forecast_hours(lat_min, lat_max, lon_min, lon_max)
-            logger.info("GFS forecast prefetch completed")
+            logger.info("GFS forecast prefetch completed, building frames cache...")
+            _build_wind_frames(lat_min, lat_max, lon_min, lon_max, run_date, run_hour)
+            logger.info("Wind frames cache ready")
         except Exception as e:
             logger.error(f"GFS forecast prefetch failed: {e}")
         finally:
@@ -1583,94 +1697,28 @@ async def api_get_forecast_frames(
     lon_max: float = Query(40.0),
 ):
     """
-    Bulk endpoint returning all cached GFS forecast frames in leaflet-velocity format.
+    Return all wind forecast frames from file cache (instant).
 
-    Returns a single JSON object with frames keyed by forecast hour.
-    Call after prefetch completes for best results.
-    Falls back to the best available cached run if the latest GFS run has no data.
+    The cache is built once during prefetch. No GRIB parsing happens here.
+    Serves the raw JSON file to avoid parse+re-serialize overhead.
     """
-    if _last_wind_prefetch_run:
-        run_date, run_hour = _last_wind_prefetch_run
-    else:
-        run_date, run_hour = gfs_provider._get_latest_run()
-    hours_status = gfs_provider.get_cached_forecast_hours(lat_min, lat_max, lon_min, lon_max, run_date, run_hour)
-    cached_count_check = sum(1 for h in hours_status if h["cached"])
+    from starlette.responses import Response
+    cache_key = _wind_cache_key(lat_min, lat_max, lon_min, lon_max)
+    cache_file = _WIND_CACHE_DIR / f"{cache_key}.json"
+    if cache_file.exists():
+        return Response(content=cache_file.read_bytes(), media_type="application/json")
 
-    # Fallback: if the chosen run has no cached files, scan the cache for the best available run
-    if cached_count_check == 0:
-        best = gfs_provider.find_best_cached_run(lat_min, lat_max, lon_min, lon_max)
-        if best:
-            run_date, run_hour = best
-            hours_status = gfs_provider.get_cached_forecast_hours(lat_min, lat_max, lon_min, lon_max, run_date, run_hour)
-            logger.info(f"Wind frames: fell back to cached run {run_date}/{run_hour}z")
-
+    # No file cache — return empty (prefetch hasn't run or hasn't finished yet)
+    run_date, run_hour = gfs_provider._get_latest_run()
     run_time = datetime.strptime(f"{run_date}{run_hour}", "%Y%m%d%H")
-
-    frames = {}
-    for h_info in hours_status:
-        if not h_info["cached"]:
-            continue
-
-        fh = h_info["forecast_hour"]
-        wind_data = gfs_provider.fetch_wind_data(lat_min, lat_max, lon_min, lon_max, forecast_hour=fh, run_date=run_date, run_hour=run_hour)
-        if wind_data is None:
-            continue
-
-        # Apply ocean mask
-        u_masked, v_masked = _apply_ocean_mask_velocity(
-            wind_data.u_component, wind_data.v_component,
-            wind_data.lats, wind_data.lons,
-        )
-
-        actual_lats = wind_data.lats
-        actual_lons = wind_data.lons
-        actual_dx = abs(float(actual_lons[1] - actual_lons[0])) if len(actual_lons) > 1 else 0.25
-        actual_dy = abs(float(actual_lats[1] - actual_lats[0])) if len(actual_lats) > 1 else 0.25
-
-        # leaflet-velocity expects N→S ordering
-        if len(actual_lats) > 1 and actual_lats[1] > actual_lats[0]:
-            u_ordered = u_masked[::-1]
-            v_ordered = v_masked[::-1]
-            lat_north = float(actual_lats[-1])
-            lat_south = float(actual_lats[0])
-        else:
-            u_ordered = u_masked
-            v_ordered = v_masked
-            lat_north = float(actual_lats[0])
-            lat_south = float(actual_lats[-1])
-
-        valid_time = run_time + timedelta(hours=fh)
-        header = {
-            "parameterCategory": 2,
-            "parameterNumber": 2,
-            "lo1": float(actual_lons[0]),
-            "la1": lat_north,
-            "lo2": float(actual_lons[-1]),
-            "la2": lat_south,
-            "dx": actual_dx,
-            "dy": actual_dy,
-            "nx": len(actual_lons),
-            "ny": len(actual_lats),
-            "refTime": valid_time.isoformat(),
-            "forecastHour": fh,
-        }
-
-        frames[str(fh)] = [
-            {"header": {**header, "parameterNumber": 2}, "data": u_ordered.flatten().tolist()},
-            {"header": {**header, "parameterNumber": 3}, "data": v_ordered.flatten().tolist()},
-        ]
-
-    cached_count = len(frames)
-    total_count = len(GFSDataProvider.FORECAST_HOURS)
-
     return {
         "run_date": run_date,
         "run_hour": run_hour,
         "run_time": run_time.isoformat(),
-        "total_hours": total_count,
-        "cached_hours": cached_count,
+        "total_hours": len(GFSDataProvider.FORECAST_HOURS),
+        "cached_hours": 0,
         "source": "gfs",
-        "frames": frames,
+        "frames": {},
     }
 
 
