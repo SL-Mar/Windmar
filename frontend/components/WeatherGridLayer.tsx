@@ -205,23 +205,20 @@ function WeatherGridLayerInner({
     const currentMode = mode;
     const currentShowArrows = showArrows;
     const DS = 128; // render at 128x128, upscale to 256x256
+    const tileSize = 256;
 
-    const WeatherTileLayer = L.GridLayer.extend({
-      createTile(coords: any) {
-        const tile = document.createElement('canvas') as HTMLCanvasElement;
-        tile.width = 256;
-        tile.height = 256;
-
-        // Read latest data from refs
+    // ---- Extracted tile painter (shared by createTile + refreshTiles) ----
+    function paintTile(tile: HTMLCanvasElement, coords: any) {
         const currentWindData = windDataRef.current;
         const currentWaveData = waveDataRef.current;
         const currentExtendedData = extendedDataRef.current;
         const isExtended = currentMode === 'ice' || currentMode === 'visibility' || currentMode === 'sst' || currentMode === 'swell';
         const data = isExtended ? currentExtendedData : (currentMode === 'wind' ? currentWindData : currentWaveData);
-        if (!data) return tile;
 
         const ctx = tile.getContext('2d');
-        if (!ctx) return tile;
+        if (!ctx) return;
+        ctx.clearRect(0, 0, 256, 256);
+        if (!data) return;
 
         const lats = data.lats;
         const lons = data.lons;
@@ -262,40 +259,33 @@ function WeatherGridLayerInner({
         offscreen.width = DS;
         offscreen.height = DS;
         const offCtx = offscreen.getContext('2d');
-        if (!offCtx) return tile;
+        if (!offCtx) return;
 
         const imgData = offCtx.createImageData(DS, DS);
         const pixels = imgData.data;
 
-        // Compute tile lat/lon bounds
-        const tileSize = 256;
         const zoom = coords.z;
 
         for (let py = 0; py < DS; py++) {
           for (let px = 0; px < DS; px++) {
-            // Map pixel to real pixel coords within the tile
             const realX = (px / DS) * tileSize;
             const realY = (py / DS) * tileSize;
 
-            // Convert tile pixel to global point
             const globalX = coords.x * tileSize + realX;
             const globalY = coords.y * tileSize + realY;
 
-            // Convert pixel to lat/lng
             const lng = (globalX / Math.pow(2, zoom) / tileSize) * 360 - 180;
             const latRad = Math.atan(
               Math.sinh(Math.PI * (1 - (2 * globalY) / (Math.pow(2, zoom) * tileSize)))
             );
             const lat = (latRad * 180) / Math.PI;
 
-            // Check if within data bounds (with fade margin)
             if (lat < latMin || lat > latMax || lng < lonMin || lng > lonMax) {
               const idx = (py * DS + px) * 4;
-              pixels[idx + 3] = 0; // transparent
+              pixels[idx + 3] = 0;
               continue;
             }
 
-            // Edge fade: fade out over ~2 degrees near data boundary
             const fadeDeg = 2;
             const edgeFade = Math.min(
               Math.min((lat - latMin) / fadeDeg, (latMax - lat) / fadeDeg),
@@ -303,7 +293,6 @@ function WeatherGridLayerInner({
               1,
             );
 
-            // Find grid indices (fractional) — use original array ordering
             const latFracIdx = ((lat - latStart) / (latEnd - latStart)) * (ny - 1);
             const lonFracIdx = ((lng - lonStart) / (lonEnd - lonStart)) * (nx - 1);
             const latIdx = Math.floor(latFracIdx);
@@ -311,13 +300,12 @@ function WeatherGridLayerInner({
             const latFrac = latFracIdx - latIdx;
             const lonFrac = lonFracIdx - lonIdx;
 
-            // Check ocean mask (nearest-neighbor against high-res grid)
             if (oceanMask) {
               const mLatIdx = Math.round(((lat - maskLatMin) / (maskLatMax - maskLatMin)) * (maskNy - 1));
               const mLonIdx = Math.round(((lng - maskLonMin) / (maskLonMax - maskLonMin)) * (maskNx - 1));
               if (mLatIdx < 0 || mLatIdx >= maskNy || mLonIdx < 0 || mLonIdx >= maskNx || !oceanMask[mLatIdx]?.[mLonIdx]) {
                 const idx = (py * DS + px) * 4;
-                pixels[idx + 3] = 0; // land → transparent
+                pixels[idx + 3] = 0;
                 continue;
               }
             }
@@ -333,23 +321,21 @@ function WeatherGridLayerInner({
               color = waveColor(h);
             } else if (extValues) {
               const val = bilinearInterpolate(extValues, latIdx, lonIdx, latFrac, lonFrac, ny, nx);
-              // NaN guard: CMEMS returns NaN outside coverage — render transparent
               if (Number.isNaN(val)) {
                 const idx = (py * DS + px) * 4;
                 pixels[idx + 3] = 0;
                 continue;
               }
               if (currentMode === 'ice') color = iceColor(val);
-              else if (currentMode === 'visibility') color = visibilityColor(val * 1000); // API returns km, function expects meters
+              else if (currentMode === 'visibility') color = visibilityColor(val * 1000);
               else if (currentMode === 'sst') color = sstColor(val);
-              else color = swellColor(val); // swell
+              else color = swellColor(val);
             } else {
               const idx = (py * DS + px) * 4;
               pixels[idx + 3] = 0;
               continue;
             }
 
-            // Data boundary fade
             let alpha = color[3];
             alpha = Math.round(alpha * Math.max(0, Math.min(1, edgeFade)));
 
@@ -363,7 +349,6 @@ function WeatherGridLayerInner({
 
         offCtx.putImageData(imgData, 0, 0);
 
-        // Upscale to 256x256 with smoothing
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(offscreen, 0, 0, DS, DS, 0, 0, 256, 256);
@@ -392,7 +377,6 @@ function WeatherGridLayerInner({
               const aLatFrac = latFracIdx - aLatIdx;
               const aLonFrac = lonFracIdx - aLonIdx;
 
-              // Skip land (nearest-neighbor on high-res mask)
               if (oceanMask) {
                 const mLatIdx = Math.round(((aLat - maskLats[0]) / (maskLats[maskNy - 1] - maskLats[0])) * (maskNy - 1));
                 const mLonIdx = Math.round(((lng - maskLons[0]) / (maskLons[maskNx - 1] - maskLons[0])) * (maskNx - 1));
@@ -404,7 +388,7 @@ function WeatherGridLayerInner({
               const speed = Math.sqrt(u * u + v * v);
               if (speed < 1) continue;
 
-              const angle = Math.atan2(-v, u); // screen Y is inverted
+              const angle = Math.atan2(-v, u);
               const len = Math.min(16, 4 + speed * 0.8);
 
               ctx.translate(ax, ay);
@@ -417,7 +401,6 @@ function WeatherGridLayerInner({
               ctx.lineTo(len / 2, 0);
               ctx.stroke();
 
-              // Arrowhead
               ctx.fillStyle = 'rgba(255,255,255,0.8)';
               ctx.beginPath();
               ctx.moveTo(len / 2, 0);
@@ -426,7 +409,7 @@ function WeatherGridLayerInner({
               ctx.closePath();
               ctx.fill();
 
-              ctx.setTransform(1, 0, 0, 1, 0, 0); // reset transform
+              ctx.setTransform(1, 0, 0, 1, 0, 0);
             }
           }
           ctx.restore();
@@ -434,7 +417,7 @@ function WeatherGridLayerInner({
 
         // Draw swell & wind-wave direction crest marks (Windy-style arcs)
         if (currentShowArrows && currentMode === 'waves') {
-          const waveW = currentWaveData as any; // access decomposition fields
+          const waveW = currentWaveData as any;
           const swellDir = waveW?.swell?.direction as number[][] | undefined;
           const swellHt = waveW?.swell?.height as number[][] | undefined;
           const wwDir = waveW?.windwave?.direction as number[][] | undefined;
@@ -445,39 +428,29 @@ function WeatherGridLayerInner({
           const spacing = 30;
           ctx.save();
 
-          // Helper: draw wave crest arcs perpendicular to propagation direction
           const drawWaveCrest = (
             cx: number, cy: number, dirDeg: number, height: number,
             color: string, alpha: number,
           ) => {
-            // Met "from" → propagation direction (+180°)
             const propRad = ((dirDeg + 180) * Math.PI) / 180;
-            // Perpendicular to propagation (crest line)
             const perpRad = propRad + Math.PI / 2;
-            // Arc length proportional to wave height
             const arcLen = Math.min(12, 4 + height * 3);
-            // Curvature amount (how much the arc bows toward propagation)
             const curve = Math.min(4, 1.5 + height * 0.8);
-            // Offset between parallel crests along propagation direction
             const crestGap = 3.5;
 
             ctx.lineCap = 'round';
 
-            // Draw 3 parallel crest arcs
             for (let k = -1; k <= 1; k++) {
               const ox = cx + Math.cos(propRad) * k * crestGap;
               const oy = cy + Math.sin(propRad) * k * crestGap;
-              // Scale: center arc is largest, outer arcs are smaller
               const scale = k === 0 ? 1.0 : 0.7;
               const halfLen = arcLen * scale * 0.5;
 
-              // Start and end of arc along perpendicular direction
               const x0 = ox - Math.cos(perpRad) * halfLen;
               const y0 = oy - Math.sin(perpRad) * halfLen;
               const x1 = ox + Math.cos(perpRad) * halfLen;
               const y1 = oy + Math.sin(perpRad) * halfLen;
 
-              // Control point bowed in propagation direction
               const cpx = ox + Math.cos(propRad) * curve * scale;
               const cpy = oy + Math.sin(propRad) * curve * scale;
 
@@ -510,14 +483,12 @@ function WeatherGridLayerInner({
               const aLatFrac = latFracIdx - aLatIdx;
               const aLonFrac = lonFracIdx - aLonIdx;
 
-              // Skip land
               if (oceanMask) {
                 const mLatIdx = Math.round(((aLat - maskLats[0]) / (maskLats[maskNy - 1] - maskLats[0])) * (maskNy - 1));
                 const mLonIdx = Math.round(((lng - maskLons[0]) / (maskLons[maskNx - 1] - maskLons[0])) * (maskNx - 1));
                 if (mLatIdx < 0 || mLatIdx >= maskNy || mLonIdx < 0 || mLonIdx >= maskNx || !oceanMask[mLatIdx]?.[mLonIdx]) continue;
               }
 
-              // Primary swell: white crest arcs, size ∝ height
               if (hasSwell) {
                 const sh = bilinearInterpolate(swellHt, aLatIdx, aLonIdx, aLatFrac, aLonFrac, ny, nx);
                 if (sh > 0.2) {
@@ -527,7 +498,6 @@ function WeatherGridLayerInner({
                 }
               }
 
-              // Wind-wave: lighter/smaller crest arcs, offset slightly
               if (hasWW) {
                 const wh = bilinearInterpolate(wwHt, aLatIdx, aLonIdx, aLatFrac, aLonFrac, ny, nx);
                 if (wh > 0.2) {
@@ -537,7 +507,6 @@ function WeatherGridLayerInner({
                 }
               }
 
-              // Fallback: mean direction if no decomposition
               if (!hasSwell && !hasWW && waveDir && waveValues) {
                 const h = bilinearInterpolate(waveValues, aLatIdx, aLonIdx, aLatFrac, aLonFrac, ny, nx);
                 if (h > 0.3) {
@@ -550,8 +519,26 @@ function WeatherGridLayerInner({
           }
           ctx.restore();
         }
+    }
 
+    const WeatherTileLayer = L.GridLayer.extend({
+      createTile(coords: any) {
+        const tile = document.createElement('canvas') as HTMLCanvasElement;
+        tile.width = 256;
+        tile.height = 256;
+        paintTile(tile, coords);
         return tile;
+      },
+      // Repaint existing tile canvases in-place (no flash)
+      refreshTiles() {
+        const tiles = this._tiles;
+        if (!tiles) return;
+        for (const key in tiles) {
+          const t = tiles[key];
+          if (t.el && t.coords) {
+            paintTile(t.el as HTMLCanvasElement, t.coords);
+          }
+        }
       },
     });
 
@@ -573,8 +560,8 @@ function WeatherGridLayerInner({
     };
   }, [mode, opacity, map, L, showArrows]); // NOT windData/waveData — data is read from refs
 
-  // When data changes, just redraw tiles (no layer destroy/recreate).
-  // This is the key fix: avoids creating hundreds of canvas elements per frame change.
+  // When data changes, repaint existing tile canvases in-place (no flash).
+  // refreshTiles() reuses DOM elements — avoids the destroy/recreate cycle.
   const redrawCountRef = useRef(0);
   useEffect(() => {
     if (layerRef.current) {
@@ -587,8 +574,12 @@ function WeatherGridLayerInner({
           : mode === 'wind' && windData?.u
             ? windData.u[Math.floor(windData.u.length / 2)]?.[0]?.toFixed(2) ?? '?'
             : '?';
-      debugLog('debug', 'RENDER', `GridLayer redraw #${redrawCountRef.current}: mode=${mode}, sample=${sample}, hasLayer=${!!layerRef.current}`);
-      layerRef.current.redraw();
+      debugLog('debug', 'RENDER', `GridLayer refresh #${redrawCountRef.current}: mode=${mode}, sample=${sample}`);
+      if (layerRef.current.refreshTiles) {
+        layerRef.current.refreshTiles();
+      } else {
+        layerRef.current.redraw();
+      }
     }
   }, [windData, waveData, extendedData, mode]);
 
