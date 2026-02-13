@@ -539,6 +539,30 @@ class DbWeatherProvider:
         finally:
             conn.close()
 
+    def has_data_for_source(self, source: str, max_age_hours: int = 24) -> bool:
+        """Check if a given source has a recent completed run."""
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT ingested_at FROM weather_forecast_runs
+                   WHERE source = %s AND status = 'complete'
+                   ORDER BY ingested_at DESC LIMIT 1""",
+                (source,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return False
+            ingested_at = row[0]
+            if ingested_at.tzinfo is None:
+                ingested_at = ingested_at.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - ingested_at).total_seconds() / 3600
+            return age < max_age_hours
+        except Exception:
+            return False
+        finally:
+            conn.close()
+
     def has_data(self) -> bool:
         """Check if any complete weather data exists in the database."""
         conn = self._get_conn()

@@ -193,6 +193,48 @@ export interface IceForecastFrames {
   frames: Record<string, IceForecastFrame>;
 }
 
+// SST forecast types
+export interface SstForecastFrame {
+  data: number[][];
+}
+
+export interface SstForecastFrames {
+  run_time: string;
+  total_hours: number;
+  cached_hours: number;
+  source?: string;
+  lats: number[];
+  lons: number[];
+  ny: number;
+  nx: number;
+  ocean_mask?: boolean[][];
+  ocean_mask_lats?: number[];
+  ocean_mask_lons?: number[];
+  colorscale?: { min: number; max: number; colors: string[] };
+  frames: Record<string, SstForecastFrame>;
+}
+
+// Visibility forecast types
+export interface VisForecastFrame {
+  data: number[][];
+}
+
+export interface VisForecastFrames {
+  run_time: string;
+  total_hours: number;
+  cached_hours: number;
+  source?: string;
+  lats: number[];
+  lons: number[];
+  ny: number;
+  nx: number;
+  ocean_mask?: boolean[][];
+  ocean_mask_lats?: number[];
+  ocean_mask_lons?: number[];
+  colorscale?: { min: number; max: number; colors: string[] };
+  frames: Record<string, VisForecastFrame>;
+}
+
 export interface VelocityData {
   header: {
     parameterCategory: number;
@@ -808,6 +850,19 @@ export const apiClient = {
   // Weather API (Layer 1)
   // -------------------------------------------------------------------------
 
+  async ensureAllWeatherData(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+    force?: boolean;
+  } = {}): Promise<{ sources: Record<string, string>; elapsed_ms: number }> {
+    const response = await api.post('/api/weather/ensure-all', params, {
+      timeout: 300000, // 5 min — external API fetches can be slow
+    });
+    return response.data;
+  },
+
   async getWindField(params: {
     lat_min?: number;
     lat_max?: number;
@@ -815,6 +870,7 @@ export const apiClient = {
     lon_max?: number;
     resolution?: number;
     time?: string;
+    db_only?: boolean;
   } = {}): Promise<WindFieldData> {
     const response = await api.get<WindFieldData>('/api/weather/wind', { params });
     return response.data;
@@ -828,6 +884,7 @@ export const apiClient = {
     resolution?: number;
     time?: string;
     forecast_hour?: number;
+    db_only?: boolean;
   } = {}): Promise<VelocityData[]> {
     const response = await api.get<VelocityData[]>('/api/weather/wind/velocity', { params });
     return response.data;
@@ -957,6 +1014,68 @@ export const apiClient = {
     return response.data;
   },
 
+  // SST forecast
+  async getSstForecastStatus(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<ForecastStatus> {
+    const response = await api.get<ForecastStatus>('/api/weather/forecast/sst/status', { params });
+    return response.data;
+  },
+
+  async triggerSstForecastPrefetch(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<{ status: string; message: string }> {
+    const response = await api.post('/api/weather/forecast/sst/prefetch', null, { params });
+    return response.data;
+  },
+
+  async getSstForecastFrames(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<SstForecastFrames> {
+    const response = await api.get<SstForecastFrames>('/api/weather/forecast/sst/frames', { params });
+    return response.data;
+  },
+
+  // Visibility forecast
+  async getVisForecastStatus(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<ForecastStatus> {
+    const response = await api.get<ForecastStatus>('/api/weather/forecast/visibility/status', { params });
+    return response.data;
+  },
+
+  async triggerVisForecastPrefetch(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<{ status: string; message: string }> {
+    const response = await api.post('/api/weather/forecast/visibility/prefetch', null, { params });
+    return response.data;
+  },
+
+  async getVisForecastFrames(params: {
+    lat_min?: number;
+    lat_max?: number;
+    lon_min?: number;
+    lon_max?: number;
+  } = {}): Promise<VisForecastFrames> {
+    const response = await api.get<VisForecastFrames>('/api/weather/forecast/visibility/frames', { params });
+    return response.data;
+  },
+
   async getWaveField(params: {
     lat_min?: number;
     lat_max?: number;
@@ -964,6 +1083,7 @@ export const apiClient = {
     lon_max?: number;
     resolution?: number;
     time?: string;
+    db_only?: boolean;
   } = {}): Promise<WaveFieldData> {
     const response = await api.get<WaveFieldData>('/api/weather/waves', { params });
     return response.data;
@@ -976,6 +1096,7 @@ export const apiClient = {
     lon_max?: number;
     resolution?: number;
     time?: string;
+    db_only?: boolean;
   } = {}): Promise<VelocityData[]> {
     const response = await api.get<VelocityData[]>('/api/weather/currents/velocity', { params });
     return response.data;
@@ -999,7 +1120,7 @@ export const apiClient = {
     return response.data;
   },
 
-  async getIceField(params: { lat_min?: number; lat_max?: number; lon_min?: number; lon_max?: number; resolution?: number } = {}): Promise<GridFieldData> {
+  async getIceField(params: { lat_min?: number; lat_max?: number; lon_min?: number; lon_max?: number; resolution?: number; db_only?: boolean } = {}): Promise<GridFieldData> {
     const response = await api.get<GridFieldData>('/api/weather/ice', { params });
     return response.data;
   },

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { Ship, Gauge, Shield, Map } from 'lucide-react';
+import { Ship, Gauge, Shield, Map, LogOut } from 'lucide-react';
 import Link from 'next/link';
 import VoyageDropdown from '@/components/VoyageDropdown';
 import RegulationsDropdown from '@/components/RegulationsDropdown';
@@ -109,6 +109,16 @@ export default function Header() {
               <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
               <span className="text-sm text-gray-300">Online</span>
             </div>
+
+            {/* Exit */}
+            <button
+              onClick={() => { window.close(); window.location.href = 'about:blank'; }}
+              className="flex items-center space-x-1.5 px-3 py-2 rounded-lg text-gray-400 hover:text-red-400 hover:bg-red-500/10 transition-all"
+              title="Exit"
+            >
+              <LogOut className="w-5 h-5" />
+              <span className="text-sm font-medium hidden sm:inline">Exit</span>
+            </button>
           </div>
         </div>
       </div>

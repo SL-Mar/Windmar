@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { Loader2 } from 'lucide-react';
-import { Position, WindFieldData, WaveFieldData, VelocityData, CreateZoneRequest, WaveForecastFrames, IceForecastFrames, AllOptimizationResults, RouteVisibility, OptimizedRouteKey, ROUTE_STYLES } from '@/lib/api';
+import { Position, WindFieldData, WaveFieldData, VelocityData, CreateZoneRequest, WaveForecastFrames, IceForecastFrames, SstForecastFrames, VisForecastFrames, AllOptimizationResults, RouteVisibility, OptimizedRouteKey, ROUTE_STYLES } from '@/lib/api';
 
 // Dynamic imports for map components (client-side only)
 const MapContainer = dynamic(
@@ -88,6 +88,9 @@ export interface MapComponentProps {
   onWaveForecastHourChange?: (hour: number, allFrames: WaveForecastFrames | null) => void;
   onCurrentForecastHourChange?: (hour: number, allFrames: any | null) => void;
   onIceForecastHourChange?: (hour: number, allFrames: IceForecastFrames | null) => void;
+  onSwellForecastHourChange?: (hour: number, allFrames: WaveForecastFrames | null) => void;
+  onSstForecastHourChange?: (hour: number, allFrames: SstForecastFrames | null) => void;
+  onVisForecastHourChange?: (hour: number, allFrames: VisForecastFrames | null) => void;
   allResults?: AllOptimizationResults;
   routeVisibility?: RouteVisibility;
   onViewportChange?: (viewport: { bounds: { lat_min: number; lat_max: number; lon_min: number; lon_max: number }; zoom: number }) => void;
@@ -118,6 +121,9 @@ export default function MapComponent({
   onWaveForecastHourChange,
   onCurrentForecastHourChange,
   onIceForecastHourChange,
+  onSwellForecastHourChange,
+  onSstForecastHourChange,
+  onVisForecastHourChange,
   allResults,
   routeVisibility,
   onViewportChange,
@@ -270,7 +276,11 @@ export default function MapComponent({
           onWaveForecastHourChange={onWaveForecastHourChange}
           onCurrentForecastHourChange={onCurrentForecastHourChange}
           onIceForecastHourChange={onIceForecastHourChange}
-          layerType={(['wind', 'waves', 'currents', 'ice'] as const).includes(weatherLayer as any) ? weatherLayer as any : 'wind'}
+          onSwellForecastHourChange={onSwellForecastHourChange}
+          onSstForecastHourChange={onSstForecastHourChange}
+          onVisForecastHourChange={onVisForecastHourChange}
+          layerType={(['wind', 'waves', 'currents', 'ice', 'swell', 'sst', 'visibility'] as const).includes(weatherLayer as any) ? weatherLayer as any : 'wind'}
+          displayLayerName={{ wind: 'Wind Speed', waves: 'Waves', currents: 'Currents', ice: 'Ice', visibility: 'Visibility', sst: 'Sea Surface Temp', swell: 'Swell', none: undefined }[weatherLayer]}
           viewportBounds={viewportBounds}
         />
       )}
