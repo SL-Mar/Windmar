@@ -4,6 +4,10 @@
 
 A maritime route optimization platform for Medium Range (MR) Product Tankers. Minimizes fuel consumption through weather-aware A\* routing, physics-based vessel modeling, and real-time sensor fusion.
 
+![Route Analysis — weather overlays with voyage calculation and Monte Carlo simulation](docs/windmar-route-analysis.png)
+
+![Passage Plan — per-waypoint analysis with ETA, weather conditions, and fuel consumption](docs/windmar-passage-plan.png)
+
 ## Features
 
 ### Vessel Performance Modeling
@@ -27,15 +31,17 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 - RTZ file import/export (IEC 61174 ECDIS standard)
 
 ### Weather Integration
+- **7 visualization layers**: wind, waves, currents, swell, SST, visibility, ice — each with WMO-standard color ramps
 - NOAA GFS (0.25°) for near-real-time wind fields via NOMADS GRIB filter
-- 5-day wind forecast timeline (f000–f120, 3-hourly steps) with Windy-style animation
-- Copernicus Marine Service (CMEMS) for wave and ocean current data
+- Copernicus Marine Service (CMEMS) for waves, currents, SST, swell, visibility, and ice data
 - ERA5 reanalysis as secondary wind fallback (~5-day lag)
 - Climatology fallback for beyond-forecast-horizon voyages
 - Unified provider that blends forecast and climatology with smooth transitions
 - **Pre-ingested weather database** — grids compressed (zlib/float32) in PostgreSQL, served in milliseconds
 - **Redis shared cache** across all API workers (replaces per-worker in-memory dict)
-- 6-hourly background ingestion cycle (waves, currents, and wind) with DB → live → synthetic fallback chain
+- 6-hourly background ingestion cycle (wind, waves, currents, ice) with DB → live → synthetic fallback chain
+- On-demand forecast prefetch for SST, visibility, and swell layers
+- **Forecast timeline for all layers** — play/pause, speed control, and 5-day scrubbing across wind, waves, swell, SST, visibility, and ice
 - Synthetic data generator for testing and demos
 
 ### Monte Carlo Simulation
@@ -61,17 +67,21 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 - Continuous model recalibration from live data
 
 ### Web Interface
-- ECDIS-style map-centric layout with full-width chart and header dropdowns
+- **Two-mode architecture**: Weather mode (full-screen map with 7 weather overlays) and Analysis mode (left panel for route calculation, optimization, and Monte Carlo simulation)
+- ECDIS-style map-centric layout with full-width chart and header mode toggle
 - Interactive Leaflet maps with weather overlays and route visualization
-- Wind particle animation layer (leaflet-velocity)
+- Wind particle animation layer (leaflet-velocity) and current particle animation
 - Windy-style wave crest rendering with click-to-inspect polar diagram popup
-- Forecast timeline with play/pause, speed control, and 5-day scrubbing
+- Forecast timeline with play/pause, speed control, and 5-day scrubbing — available for all 7 weather layers
+- **Analysis panel** (left, 320px) — route import (RTZ/JSON), voyage calculation, optimization comparison, Monte Carlo simulation, and link to detailed analysis page
+- **Analysis detail page** — per-waypoint passage plan table with ETA, SOG, wind, waves, current speed/direction, fuel, and data source badges; weather insights summary; Monte Carlo P10/P50/P90 results
+- **Route management** — rename routes inline, save to JSON file, reload from local disk
 - All 6 optimized routes displayed simultaneously with per-route color coding and toggleable visibility
 - Unified comparison table with fuel, distance, time, and waypoint counts for every route variant
 - Sequential optimization with progressive map updates (routes appear one by one)
 - Navigation persistence — waypoints, route name, and optimization results survive page navigation via React Context
-- Voyage calculation with per-leg fuel, speed, and ETA breakdown
 - Consolidated vessel configuration, calibration, and fuel analysis page (CSV + Excel upload)
+- Vessel speed sync — laden/ballast speed from backend vessel specs automatically applied in context
 - CII compliance tracking and projections
 - Dark maritime theme, responsive design
 
@@ -266,15 +276,14 @@ See the [Monte Carlo Simulation](https://quantcoder-fs.com/windmar/monte-carlo.h
 - `GET /api/weather/currents/velocity` - Currents in leaflet-velocity format
 - `GET /api/weather/point` - Weather at specific coordinates
 
-### Forecast (Wind)
-- `GET /api/weather/forecast/status` - GFS prefetch progress and run info
-- `POST /api/weather/forecast/prefetch` - Trigger 5-day forecast download (f000–f120)
-- `GET /api/weather/forecast/frames` - Bulk download all forecast frames
-
-### Forecast (Wave)
-- `GET /api/weather/forecast/wave/status` - Wave forecast prefetch progress
-- `POST /api/weather/forecast/wave/prefetch` - Trigger wave forecast download
-- `GET /api/weather/forecast/wave/frames` - Bulk download wave forecast frames
+### Forecast
+- `GET /api/weather/forecast/status` - GFS wind prefetch progress and run info
+- `POST /api/weather/forecast/prefetch` - Trigger 5-day wind forecast download (f000–f120)
+- `GET /api/weather/forecast/frames` - Bulk download wind forecast frames
+- `GET /api/weather/forecast/wave/frames` - Wave forecast frames
+- `GET /api/weather/forecast/sst/frames` - SST forecast frames
+- `GET /api/weather/forecast/ice/frames` - Ice forecast frames
+- `GET /api/weather/forecast/visibility/frames` - Visibility forecast frames
 
 ### Routes
 - `POST /api/routes/parse-rtz` - Parse RTZ route file
@@ -371,6 +380,21 @@ The system ships with a default MR Product Tanker configuration:
 
 ## Changelog
 
+### v0.0.7 — Two-Mode Architecture, Extended Weather Fields & Route Analysis
+
+Major frontend restructuring into Weather/Analysis dual-mode interface, extended weather visualization with 7 layers, and per-waypoint passage plan analysis.
+
+- **Two-mode architecture** — Weather mode (pan-and-explore with all 7 weather overlays) and Analysis mode (left panel for voyage calculation, route optimization, Monte Carlo simulation); mode toggle in header; weather overlays automatically hidden in analysis mode
+- **Analysis panel** (left, 320px) — route import (RTZ file or JSON), departure time picker, voyage calculation with summary card, optimization comparison (6 route variants), Monte Carlo P10/P50/P90, and link to detailed analysis page
+- **Analysis detail page** (`/analysis`) — per-waypoint passage plan table with ETA, SOG, wind speed/direction, wave height/direction, current speed/direction, fuel consumption, and data source badges (Forecast/Blended/Climatology); weather insights summary (max wave, max wind, max current, speed loss percentage); Monte Carlo results
+- **Extended weather visualization** — 7 map layers: wind, waves, currents, swell, SST, visibility, ice — each with WMO-standard meteorological color ramps
+- **Forecast timeline for all layers** — play/pause/scrub across 5-day forecast for wind, waves, swell, SST, visibility, and ice (previously wind-only)
+- **Route management** — click-to-rename route name, save route to JSON file, reload from local disk across sessions
+- **Vessel speed sync** — backend vessel specs (laden/ballast service speed) automatically synced to frontend context on mount and laden/ballast toggle
+- **Current data in passage plan** — current speed (kts) and direction arrows displayed per waypoint in voyage calculation results
+- **Wave direction arrows** — wave propagation direction shown alongside wave height in passage plan table
+- **Production infrastructure** — Alembic migrations, nginx reverse proxy config, pg_backup script, requirements.lock
+
 ### v0.0.6 — ECDIS UI Redesign & Dual Speed-Strategy Optimization
 
 Major UI overhaul to an ECDIS-style map-centric layout, enhanced weather visualization, and a formalized route optimization workflow with two speed strategies.
@@ -422,6 +446,19 @@ Live connectivity to Copernicus and NOAA weather services.
 - `main` - Stable release branch
 - `development` - Integration branch for features in progress
 - `feature/*` - Feature branches for experimental work
+
+## Documentation
+
+Full technical documentation is available at [quantcoder-fs.com/windmar/docs.html](https://quantcoder-fs.com/windmar/docs.html), covering:
+
+- [Hydrodynamics & RAO](https://quantcoder-fs.com/windmar/hydrodynamics.html) — Holtrop-Mennen resistance model, seakeeping theory
+- [A* Pathfinding](https://quantcoder-fs.com/windmar/astar-pathfinding.html) — Grid search algorithm with weather costs
+- [Optimization Engines](https://quantcoder-fs.com/windmar/route-optimization-engines.html) — Dual A*/VISIR engine comparison
+- [Weather Fields](https://quantcoder-fs.com/windmar/weather-fields.html) — 7-layer visualization with WMO color ramps
+- [Weather Acquisition](https://quantcoder-fs.com/windmar/weather-data.html) — Data sources, GRIB processing, forecast timeline
+- [Data Pipeline](https://quantcoder-fs.com/windmar/data-pipeline.html) — Ingestion architecture and provider chain
+- [Monte Carlo](https://quantcoder-fs.com/windmar/monte-carlo.html) — Temporal perturbation model with Cholesky correlation
+- [Open Problems](https://quantcoder-fs.com/windmar/open-problems.html) — Known limitations and future work
 
 ## License
 
