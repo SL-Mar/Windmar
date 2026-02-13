@@ -41,7 +41,7 @@ services:
       API_SECRET_KEY: ${API_SECRET_KEY:-change_me}
       CORS_ORIGINS: "https://demo.slmar.co,http://localhost:3000"
       LOG_LEVEL: "warning"
-      ENVIRONMENT: "production"
+      ENVIRONMENT: "demo"
     expose:
       - "8000"
     depends_on:
@@ -51,7 +51,7 @@ services:
       resources:
         limits:
           memory: 2G
-    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
     restart: unless-stopped
 
   frontend:
