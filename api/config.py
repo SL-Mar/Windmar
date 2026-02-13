@@ -139,8 +139,8 @@ def get_settings() -> Settings:
 # Convenience exports
 settings = get_settings()
 
-# Validate critical settings in production
-if settings.is_production:
+# Validate critical settings in production (skip in demo mode)
+if settings.is_production and not settings.demo_mode:
     if settings.api_secret_key == "dev_secret_key_change_in_production":
         raise ValueError(
             "API_SECRET_KEY must be changed in production! "
