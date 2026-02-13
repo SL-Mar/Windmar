@@ -12,6 +12,7 @@ from enum import Enum
 from dataclasses import dataclass
 import redis
 
+from sqlalchemy import text
 from api.config import settings
 from api.cache import get_all_cache_stats
 from api.resilience import get_all_circuit_breaker_status
@@ -51,7 +52,7 @@ def check_database_health() -> ComponentHealth:
         db = SessionLocal()
         try:
             # Execute simple query
-            result = db.execute("SELECT 1").scalar()
+            result = db.execute(text("SELECT 1")).scalar()
             latency_ms = (datetime.utcnow() - start).total_seconds() * 1000
 
             if result == 1:
@@ -159,9 +160,17 @@ def check_weather_provider_health() -> ComponentHealth:
 
         copernicus = providers.get('copernicus')
         has_cds = copernicus._has_cdsapi if copernicus else False
-        has_cmems = copernicus._has_copernicusmarine if copernicus else False
+        has_cmems = (
+            copernicus._has_copernicusmarine
+            and bool(copernicus.cmems_username)
+            and bool(copernicus.cmems_password)
+        ) if copernicus else False
 
-        if has_cds and has_cmems:
+        # In demo mode, weather is served from DB snapshot
+        if settings.demo_mode:
+            status = HealthStatus.HEALTHY
+            message = "Demo mode — weather served from DB snapshot"
+        elif has_cds and has_cmems:
             status = HealthStatus.HEALTHY
             message = "Full Copernicus access available"
         elif has_cds or has_cmems:
