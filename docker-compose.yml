@@ -56,6 +56,8 @@ services:
       API_SECRET_KEY: ${API_SECRET_KEY:-change_this_in_production}
       API_KEY_HEADER: ${API_KEY_HEADER:-X-API-Key}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:3001}
+      # Authentication
+      AUTH_ENABLED: ${AUTH_ENABLED:-false}
       # Application
       LOG_LEVEL: ${LOG_LEVEL:-info}
       ENVIRONMENT: ${ENVIRONMENT:-development}

@@ -4,13 +4,13 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import dynamic from 'next/dynamic';
 import Header from '@/components/Header';
 import MapOverlayControls from '@/components/MapOverlayControls';
-import RouteIndicatorPanel from '@/components/RouteIndicatorPanel';
-import AnalysisSlidePanel from '@/components/AnalysisSlidePanel';
+import AnalysisPanel from '@/components/AnalysisPanel';
 import { useVoyage } from '@/components/VoyageContext';
 import { apiClient, Position, WindFieldData, WaveFieldData, VelocityData, OptimizationResponse, CreateZoneRequest, WaveForecastFrames, IceForecastFrames, SstForecastFrames, VisForecastFrames, OptimizedRouteKey, AllOptimizationResults, EMPTY_ALL_RESULTS } from '@/lib/api';
 import { getAnalyses, saveAnalysis, deleteAnalysis, updateAnalysisMonteCarlo, AnalysisEntry } from '@/lib/analysisStorage';
 import { debugLog } from '@/lib/debugLog';
 import DebugConsole from '@/components/DebugConsole';
+import { useToast } from '@/components/Toast';
 
 const MapComponent = dynamic(() => import('@/components/MapComponent'), { ssr: false });
 
@@ -19,6 +19,7 @@ type WeatherLayer = 'wind' | 'waves' | 'currents' | 'ice' | 'visibility' | 'sst'
 export default function HomePage() {
   // Voyage context (shared with header dropdowns, persisted across navigation)
   const {
+    viewMode, departureTime,
     calmSpeed, isLaden, useWeather,
     zoneVisibility, isDrawingZone, setIsDrawingZone,
     waypoints, setWaypoints,
@@ -26,6 +27,9 @@ export default function HomePage() {
     allResults, setAllResults,
     routeVisibility, setRouteVisibility,
   } = useVoyage();
+
+  // Toast notifications
+  const toast = useToast();
 
   // Ephemeral state (local to this page)
   const [isEditing, setIsEditing] = useState(true);
@@ -61,8 +65,11 @@ export default function HomePage() {
   // Zone state
   const [zoneKey, setZoneKey] = useState(0);
 
+  // Fit-to-route state
+  const [fitBounds, setFitBounds] = useState<[[number, number], [number, number]] | null>(null);
+  const [fitKey, setFitKey] = useState(0);
+
   // Analysis state
-  const [analysisOpen, setAnalysisOpen] = useState(false);
   const [analyses, setAnalyses] = useState<AnalysisEntry[]>([]);
   const [displayedAnalysisId, setDisplayedAnalysisId] = useState<string | null>(null);
   const [simulatingId, setSimulatingId] = useState<string | null>(null);
@@ -99,6 +106,42 @@ export default function HomePage() {
     return () => { cancelled = true; };
   }, []);
 
+  // Startup freshness check: after weather data is ready, show data age toast
+  useEffect(() => {
+    if (!weatherReady) return;
+    let cancelled = false;
+    const checkFreshness = async () => {
+      try {
+        const freshness = await apiClient.getWeatherFreshness();
+        if (cancelled) return;
+
+        if (freshness.status === 'no_data' || freshness.status === 'unavailable') {
+          toast.error('No weather data available', 'Downloading fresh data...');
+          apiClient.ensureAllWeatherData({ force: true }).catch(() => {});
+          return;
+        }
+
+        const ageHours = freshness.age_hours;
+        if (ageHours === null) return;
+
+        if (ageHours < 4) {
+          const ageMin = Math.round(ageHours * 60);
+          toast.info('Weather data is current', `Updated ${ageMin < 60 ? `${ageMin} minutes` : `${ageHours.toFixed(1)}h`} ago`);
+        } else if (ageHours < 12) {
+          toast.warning('Weather data is aging', `Data is ${ageHours.toFixed(1)}h old. Refreshing...`);
+          apiClient.ensureAllWeatherData({ force: true }).catch(() => {});
+        } else {
+          toast.error('Weather data is stale', `Data is ${ageHours.toFixed(1)}h old. Refreshing...`);
+          apiClient.ensureAllWeatherData({ force: true }).catch(() => {});
+        }
+      } catch (error) {
+        debugLog('warn', 'FRESHNESS', `Freshness check failed: ${error}`);
+      }
+    };
+    checkFreshness();
+    return () => { cancelled = true; };
+  }, [weatherReady]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Compute visible zone types from context
   const visibleZoneTypes = useMemo(() => {
     return Object.entries(zoneVisibility)
@@ -120,42 +163,13 @@ export default function HomePage() {
   const weatherLayerRef = useRef(weatherLayer);
   useEffect(() => { weatherLayerRef.current = weatherLayer; }, [weatherLayer]);
 
+
+
   const waypointsRef = useRef(waypoints);
   useEffect(() => { waypointsRef.current = waypoints; }, [waypoints]);
 
   const weatherReadyRef = useRef(weatherReady);
   useEffect(() => { weatherReadyRef.current = weatherReady; }, [weatherReady]);
-
-  // Route-aware bounds helpers
-  function getRouteBounds(wps: Position[], margin: number = 3) {
-    if (wps.length === 0) return null;
-    let latMin = Infinity, latMax = -Infinity, lonMin = Infinity, lonMax = -Infinity;
-    for (const wp of wps) {
-      latMin = Math.min(latMin, wp.lat);
-      latMax = Math.max(latMax, wp.lat);
-      lonMin = Math.min(lonMin, wp.lon);
-      lonMax = Math.max(lonMax, wp.lon);
-    }
-    return {
-      lat_min: Math.max(-85, latMin - margin),
-      lat_max: Math.min(85, latMax + margin),
-      lon_min: lonMin - margin,
-      lon_max: lonMax + margin,
-    };
-  }
-
-  function unionBounds(
-    a: { lat_min: number; lat_max: number; lon_min: number; lon_max: number },
-    b: { lat_min: number; lat_max: number; lon_min: number; lon_max: number } | null,
-  ) {
-    if (!b) return a;
-    return {
-      lat_min: Math.min(a.lat_min, b.lat_min),
-      lat_max: Math.max(a.lat_max, b.lat_max),
-      lon_min: Math.min(a.lon_min, b.lon_min),
-      lon_max: Math.max(a.lon_max, b.lon_max),
-    };
-  }
 
   // Load weather data
   const loadWeatherData = useCallback(async (vp?: typeof viewport, layer?: WeatherLayer) => {
@@ -163,14 +177,13 @@ export default function HomePage() {
     const activeLayer = layer ?? weatherLayerRef.current;
     if (!v || activeLayer === 'none') return;
 
-    const routeBounds = getRouteBounds(waypointsRef.current);
-    const effectiveBounds = unionBounds(v.bounds, routeBounds);
-
+    // Weather viewer uses viewport only — route analysis endpoints
+    // fetch their own weather server-side with route-corridor bounds.
     const params = {
-      lat_min: effectiveBounds.lat_min,
-      lat_max: effectiveBounds.lat_max,
-      lon_min: effectiveBounds.lon_min,
-      lon_max: effectiveBounds.lon_max,
+      lat_min: v.bounds.lat_min,
+      lat_max: v.bounds.lat_max,
+      lon_min: v.bounds.lon_min,
+      lon_max: v.bounds.lon_max,
       resolution: getResolutionForZoom(v.zoom),
     };
 
@@ -235,12 +248,19 @@ export default function HomePage() {
     }
   }, []);
 
-  // Reload weather when viewport or active layer changes (only after data is ensured)
+  // Reload weather when viewport changes (weather mode only — prevents pan-triggered loads in analysis)
+  useEffect(() => {
+    if (weatherReady && viewport && weatherLayer !== 'none' && viewMode === 'weather') {
+      loadWeatherData(viewport, weatherLayer);
+    }
+  }, [viewport, weatherReady]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reload weather when layer changes (both modes — user explicitly toggled a layer)
   useEffect(() => {
     if (weatherReady && viewport && weatherLayer !== 'none') {
       loadWeatherData(viewport, weatherLayer);
     }
-  }, [viewport, weatherLayer, weatherReady]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [weatherLayer]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Handle wind forecast hour change from timeline
   const handleForecastHourChange = useCallback((hour: number, data: VelocityData[] | null) => {
@@ -565,6 +585,20 @@ export default function HomePage() {
     setDisplayedAnalysisId(null);
   };
 
+  // Fit map to route bounds
+  const handleFitRoute = useCallback(() => {
+    if (waypoints.length < 2) return;
+    let latMin = Infinity, latMax = -Infinity, lonMin = Infinity, lonMax = -Infinity;
+    for (const wp of waypoints) {
+      latMin = Math.min(latMin, wp.lat);
+      latMax = Math.max(latMax, wp.lat);
+      lonMin = Math.min(lonMin, wp.lon);
+      lonMax = Math.max(lonMax, wp.lon);
+    }
+    setFitBounds([[latMin, lonMin], [latMax, lonMax]]);
+    setFitKey(prev => prev + 1);
+  }, [waypoints]);
+
   // Clear route
   const handleClearRoute = () => {
     setWaypoints([]);
@@ -594,6 +628,7 @@ export default function HomePage() {
         calm_speed_kts: calmSpeed,
         is_laden: isLaden,
         use_weather: useWeather,
+        departure_time: departureTime || undefined,
       });
       const dt = ((performance.now() - t0) / 1000).toFixed(1);
       debugLog('info', 'VOYAGE', `Calculation completed in ${dt}s: ${result.total_distance_nm}nm, ${result.total_time_hours.toFixed(1)}h, ${result.total_fuel_mt.toFixed(1)}mt fuel`);
@@ -601,13 +636,12 @@ export default function HomePage() {
       const entry = saveAnalysis(
         routeName,
         waypoints,
-        { calmSpeed, isLaden, useWeather },
+        { calmSpeed, isLaden, useWeather, departureTime: departureTime || undefined },
         result,
       );
 
       setAnalyses(getAnalyses());
       setDisplayedAnalysisId(entry.id);
-      setAnalysisOpen(true);
     } catch (error) {
       const dt = ((performance.now() - t0) / 1000).toFixed(1);
       debugLog('error', 'VOYAGE', `Calculation failed after ${dt}s: ${error}`);
@@ -635,6 +669,7 @@ export default function HomePage() {
       destination: waypoints[waypoints.length - 1],
       calm_speed_kts: calmSpeed,
       is_laden: isLaden,
+      departure_time: departureTime || undefined,
       optimization_target: 'fuel' as const,
       grid_resolution_deg: 0.2,
       max_time_factor: 1.15,
@@ -750,6 +785,34 @@ export default function HomePage() {
     }
   };
 
+  // Route coverage warning: warn when waypoints extend beyond forecast viewport
+  const lastWarnedRouteRef = useRef<string>('');
+  useEffect(() => {
+    if (!forecastEnabled || !viewport || waypoints.length < 2) return;
+    const routeHash = waypoints.map(w => `${w.lat.toFixed(3)},${w.lon.toFixed(3)}`).join(';');
+    if (routeHash === lastWarnedRouteRef.current) return;
+
+    const b = viewport.bounds;
+    const latSpan = b.lat_max - b.lat_min;
+    const lonSpan = b.lon_max - b.lon_min;
+    const margin = 0.1; // 10% margin
+
+    const outOfBounds = waypoints.some(wp =>
+      wp.lat < b.lat_min - latSpan * margin ||
+      wp.lat > b.lat_max + latSpan * margin ||
+      wp.lon < b.lon_min - lonSpan * margin ||
+      wp.lon > b.lon_max + lonSpan * margin
+    );
+
+    if (outOfBounds) {
+      toast.warning(
+        'Route extends beyond forecast coverage',
+        'Pan the map to include all waypoints for full forecast data.'
+      );
+      lastWarnedRouteRef.current = routeHash;
+    }
+  }, [waypoints, viewport, forecastEnabled]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Calculate total distance
   const totalDistance = waypoints.reduce((sum, wp, i) => {
     if (i === 0) return 0;
@@ -781,7 +844,7 @@ export default function HomePage() {
 
   return (
     <div className="min-h-screen bg-gradient-maritime">
-      <Header />
+      <Header onFitRoute={handleFitRoute} />
       <DebugConsole />
 
       <main className="pt-16 h-screen">
@@ -816,7 +879,10 @@ export default function HomePage() {
             viewportBounds={viewport?.bounds ?? null}
             weatherModelLabel={weatherModelLabel}
             extendedWeatherData={extendedWeatherData}
+            fitBounds={fitBounds}
+            fitKey={fitKey}
           >
+            {/* Weather mode: overlay controls */}
             <MapOverlayControls
               weatherLayer={weatherLayer}
               onWeatherLayerChange={setWeatherLayer}
@@ -838,45 +904,35 @@ export default function HomePage() {
                 }
                 loadWeatherData();
               }}
-              analysisOpen={analysisOpen}
-              onAnalysisToggle={() => setAnalysisOpen(!analysisOpen)}
             />
 
-            <RouteIndicatorPanel
-              waypoints={waypoints}
-              onWaypointsChange={setWaypoints}
-              routeName={routeName}
-              totalDistance={totalDistance}
-              isEditing={isEditing}
-              onIsEditingChange={setIsEditing}
-              isCalculating={isCalculating}
-              onCalculate={handleCalculate}
-              isOptimizing={isOptimizing}
-              onOptimize={handleOptimize}
-              allResults={allResults}
-              onApplyOptimizedRoute={applyOptimizedRoute}
-              onDismissOptimizedRoute={dismissOptimizedRoute}
-              onRouteImport={handleRouteImport}
-              onLoadRoute={handleLoadRoute}
-              onClearRoute={handleClearRoute}
-              hasBaseline={!!displayedAnalysis}
-              analysisFuel={displayedAnalysis?.result.total_fuel_mt}
-              analysisTime={displayedAnalysis?.result.total_time_hours}
-              analysisAvgSpeed={displayedAnalysis?.result.avg_sog_kts}
-              routeVisibility={routeVisibility}
-              onRouteVisibilityChange={setRouteVisibility}
-            />
-
-            <AnalysisSlidePanel
-              open={analysisOpen}
-              onClose={() => setAnalysisOpen(false)}
-              analyses={analyses}
-              displayedAnalysisId={displayedAnalysisId}
-              onShowOnMap={handleShowOnMap}
-              onDelete={handleDeleteAnalysis}
-              onRunSimulation={handleRunSimulation}
-              simulatingId={simulatingId}
-            />
+            {/* Analysis mode: left panel */}
+            {viewMode === 'analysis' && (
+              <AnalysisPanel
+                waypoints={waypoints}
+                routeName={routeName}
+                onRouteNameChange={setRouteName}
+                totalDistance={totalDistance}
+                onRouteImport={handleRouteImport}
+                onClearRoute={handleClearRoute}
+                isEditing={isEditing}
+                onIsEditingChange={setIsEditing}
+                isCalculating={isCalculating}
+                onCalculate={handleCalculate}
+                isOptimizing={isOptimizing}
+                onOptimize={handleOptimize}
+                allResults={allResults}
+                onApplyRoute={applyOptimizedRoute}
+                onDismissRoutes={dismissOptimizedRoute}
+                routeVisibility={routeVisibility}
+                onRouteVisibilityChange={setRouteVisibility}
+                isSimulating={simulatingId !== null}
+                onRunSimulations={() => {
+                  if (displayedAnalysisId) handleRunSimulation(displayedAnalysisId);
+                }}
+                displayedAnalysis={displayedAnalysis}
+              />
+            )}
           </MapComponent>
         </div>
       </main>

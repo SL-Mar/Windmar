@@ -465,6 +465,8 @@ class LegResultModel(BaseModel):
     wind_dir_deg: float
     wave_height_m: float
     wave_dir_deg: float
+    current_speed_ms: float = 0.0
+    current_dir_deg: float = 0.0
 
     # Speeds
     calm_speed_kts: float
@@ -3988,6 +3990,8 @@ async def calculate_voyage(request: VoyageRequest):
             wind_dir_deg=round(leg.weather.wind_dir_deg, 0),
             wave_height_m=round(leg.weather.sig_wave_height_m, 1),
             wave_dir_deg=round(leg.weather.wave_dir_deg, 0),
+            current_speed_ms=round(leg.weather.current_speed_ms, 2),
+            current_dir_deg=round(leg.weather.current_dir_deg, 0),
             calm_speed_kts=round(leg.calm_speed_kts, 1),
             stw_kts=round(leg.stw_kts, 1),
             sog_kts=round(leg.sog_kts, 1),

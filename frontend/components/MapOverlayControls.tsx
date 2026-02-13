@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Wind, Waves, Droplets, Clock, RefreshCw, Eye, EyeOff, Database, BarChart3, Snowflake, CloudFog, Thermometer, AudioWaveform } from 'lucide-react';
+import { Wind, Waves, Droplets, Clock, RefreshCw, Eye, EyeOff, Database, Snowflake, CloudFog, Thermometer, AudioWaveform } from 'lucide-react';
 import { WeatherLayer } from '@/components/MapComponent';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -13,8 +13,6 @@ interface MapOverlayControlsProps {
   onForecastToggle: () => void;
   isLoadingWeather: boolean;
   onRefresh: () => void;
-  analysisOpen?: boolean;
-  onAnalysisToggle?: () => void;
 }
 
 interface FreshnessInfo {
@@ -29,8 +27,6 @@ export default function MapOverlayControls({
   onForecastToggle,
   isLoadingWeather,
   onRefresh,
-  analysisOpen,
-  onAnalysisToggle,
 }: MapOverlayControlsProps) {
   const [freshness, setFreshness] = useState<FreshnessInfo | null>(null);
 
@@ -119,14 +115,6 @@ export default function MapOverlayControls({
           label="Timeline"
           active={forecastEnabled}
           onClick={onForecastToggle}
-        />
-      )}
-      {onAnalysisToggle && (
-        <OverlayButton
-          icon={<BarChart3 className="w-4 h-4" />}
-          label="Analysis"
-          active={analysisOpen ?? false}
-          onClick={onAnalysisToggle}
         />
       )}
       <button

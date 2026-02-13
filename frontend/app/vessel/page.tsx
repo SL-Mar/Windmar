@@ -14,6 +14,7 @@ import {
   CalibrationStatus, CalibrationResult,
 } from '@/lib/api';
 import { formatFuel, formatPower } from '@/lib/utils';
+import { useVoyage } from '@/components/VoyageContext';
 
 type VesselTab = 'specifications' | 'calibration' | 'fuel';
 
@@ -70,6 +71,7 @@ function TabButton({ label, active, onClick }: { label: string; active: boolean;
 // ─── Specifications ──────────────────────────────────────────────────────────
 
 function SpecificationsSection() {
+  const { refreshSpecs } = useVoyage();
   const [specs, setSpecs] = useState<VesselSpecs>(DEFAULT_SPECS);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -93,6 +95,7 @@ function SpecificationsSection() {
     setMessage(null);
     try {
       await apiClient.updateVesselSpecs(specs);
+      await refreshSpecs();
       setMessage({ type: 'success', text: 'Vessel specifications updated successfully!' });
     } catch {
       setMessage({ type: 'error', text: 'Failed to update vessel specifications.' });

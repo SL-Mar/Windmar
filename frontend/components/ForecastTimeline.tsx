@@ -131,6 +131,53 @@ export default function ForecastTimeline({
     if (viewportBounds) boundsRef.current = viewportBounds;
   }, [viewportBounds]);
 
+  // Bounds key for cache invalidation: coarse 10°-rounded viewport bounds.
+  // Only triggers re-fetch when the user pans to a truly different ocean region,
+  // NOT on every small pan (which would miss the backend's per-bounds frame cache).
+  const BOUNDS_GRID = 10; // degrees
+  const roundBounds = (v: number) => Math.floor(v / BOUNDS_GRID) * BOUNDS_GRID;
+
+  // Pad viewport bounds OUT to grid cell edges so fetched data always covers the
+  // full grid cell.  This prevents truncated overlays when panning within a cell.
+  const paddedBounds = () => {
+    const b = boundsRef.current;
+    if (!b) return {};
+    return {
+      lat_min: Math.floor(b.lat_min / BOUNDS_GRID) * BOUNDS_GRID,
+      lat_max: Math.ceil(b.lat_max / BOUNDS_GRID) * BOUNDS_GRID,
+      lon_min: Math.floor(b.lon_min / BOUNDS_GRID) * BOUNDS_GRID,
+      lon_max: Math.ceil(b.lon_max / BOUNDS_GRID) * BOUNDS_GRID,
+    };
+  };
+  const [boundsKey, setBoundsKey] = useState('');
+  const activeBoundsKeyRef = useRef<string>('');
+  useEffect(() => {
+    if (!viewportBounds) return;
+    const key = `${roundBounds(viewportBounds.lat_min)}_${roundBounds(viewportBounds.lat_max)}_${roundBounds(viewportBounds.lon_min)}_${roundBounds(viewportBounds.lon_max)}`;
+    if (activeBoundsKeyRef.current && key !== activeBoundsKeyRef.current) {
+      debugLog('info', 'TIMELINE', `Region changed: ${activeBoundsKeyRef.current} → ${key} — clearing frame caches`);
+      // Clear all client-side frame caches
+      setWindFrames({});
+      windFramesRef.current = {};
+      setWaveFrameData(null);
+      waveFrameDataRef.current = null;
+      setCurrentFrameData(null);
+      currentFrameDataRef.current = null;
+      setIceFrameData(null);
+      iceFrameDataRef.current = null;
+      setSstFrameData(null);
+      sstFrameDataRef.current = null;
+      setVisFrameData(null);
+      visFrameDataRef.current = null;
+      // Reset prefetch state so effects re-trigger
+      setPrefetchComplete(false);
+      setAvailableHours([]);
+      setCurrentHour(0);
+    }
+    activeBoundsKeyRef.current = key;
+    setBoundsKey(key);
+  }, [viewportBounds]);
+
   // Keep refs in sync
   useEffect(() => { windFramesRef.current = windFrames; }, [windFrames]);
   useEffect(() => { waveFrameDataRef.current = waveFrameData; }, [waveFrameData]);
@@ -166,7 +213,7 @@ export default function ForecastTimeline({
     try {
       debugLog('info', 'WAVE', 'Loading wave forecast frames from API...');
       const t0 = performance.now();
-      const bp = boundsRef.current ?? {};
+      const bp = paddedBounds();
       const data: WaveForecastFrames = await apiClient.getWaveForecastFrames(bp);
       const dt = ((performance.now() - t0) / 1000).toFixed(1);
       const frameKeys = Object.keys(data.frames);
@@ -222,7 +269,7 @@ export default function ForecastTimeline({
     }
 
     let cancelled = false;
-    const bp = boundsRef.current;
+    const bp = paddedBounds();
 
     const start = async () => {
       setIsLoading(true);
@@ -238,11 +285,17 @@ export default function ForecastTimeline({
             if (st.complete || st.cached_hours === st.total_hours) {
               if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
               await loadWindFrames(bp);
+            } else if (!st.prefetch_running && st.cached_hours === 0) {
+              if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
+              debugLog('info', 'WIND', 'Status shows 0 cached, prefetch idle — loading frames directly');
+              await loadWindFrames(bp);
             }
           } catch (e) { console.error('Wind forecast poll failed:', e); }
         };
         await poll();
-        pollIntervalRef.current = setInterval(poll, 3000);
+        if (!cancelled && pollIntervalRef.current === null && !prefetchComplete) {
+          pollIntervalRef.current = setInterval(poll, 3000);
+        }
       } catch (e) {
         console.error('Wind forecast prefetch trigger failed:', e);
         setIsLoading(false);
@@ -251,15 +304,13 @@ export default function ForecastTimeline({
 
     start();
     return () => { cancelled = true; if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; } };
-  }, [visible, isWindMode, hasBounds, loadWindFrames]);
+  }, [visible, isWindMode, hasBounds, boundsKey, loadWindFrames]);
 
   // ------------------------------------------------------------------
-  // Wave prefetch effect
+  // Wave prefetch effect — loads frames directly (backend extracts on-the-fly)
   // ------------------------------------------------------------------
   useEffect(() => {
     if (!visible || !isWaveMode || !boundsRef.current) return;
-
-    // Client-side cache hit
     if (waveFrameDataRef.current) {
       const data = waveFrameDataRef.current;
       setAvailableHours(deriveHoursFromFrames(data.frames));
@@ -268,37 +319,10 @@ export default function ForecastTimeline({
       if (data.frames['0'] && onWaveForecastHourChange) onWaveForecastHourChange(0, data);
       return;
     }
-
-    let cancelled = false;
-    const bp = boundsRef.current;
-
-    const start = async () => {
-      setIsLoading(true);
-      setPrefetchComplete(false);
-      try {
-        await apiClient.triggerWaveForecastPrefetch(bp);
-        const poll = async () => {
-          if (cancelled) return;
-          try {
-            const st = await apiClient.getWaveForecastStatus(bp);
-            setLoadProgress({ cached: st.cached_hours, total: st.total_hours });
-            if (st.complete || st.cached_hours === st.total_hours) {
-              if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
-              await loadWaveFrames();
-            }
-          } catch (e) { console.error('Wave forecast poll failed:', e); }
-        };
-        await poll();
-        pollIntervalRef.current = setInterval(poll, 5000); // wave download is slower, poll less often
-      } catch (e) {
-        console.error('Wave forecast prefetch trigger failed:', e);
-        setIsLoading(false);
-      }
-    };
-
-    start();
-    return () => { cancelled = true; if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; } };
-  }, [visible, isWaveMode, hasBounds, loadWaveFrames]);
+    setIsLoading(true);
+    setPrefetchComplete(false);
+    loadWaveFrames();
+  }, [visible, isWaveMode, hasBounds, boundsKey, loadWaveFrames]);
 
   // ------------------------------------------------------------------
   // Current forecast: load all frames
@@ -307,7 +331,7 @@ export default function ForecastTimeline({
     try {
       debugLog('info', 'CURRENT', 'Loading current forecast frames from API...');
       const t0 = performance.now();
-      const bp = boundsRef.current ?? {};
+      const bp = paddedBounds();
       const data: CurrentForecastFrames = await apiClient.getCurrentForecastFrames(bp);
       const dt = ((performance.now() - t0) / 1000).toFixed(1);
       const frameKeys = Object.keys(data.frames);
@@ -342,7 +366,6 @@ export default function ForecastTimeline({
   useEffect(() => {
     if (!visible || !isCurrentMode || !boundsRef.current) return;
 
-    // Client-side cache hit
     if (currentFrameDataRef.current) {
       const data = currentFrameDataRef.current;
       setAvailableHours(deriveHoursFromFrames(data.frames));
@@ -351,38 +374,10 @@ export default function ForecastTimeline({
       if (data.frames['0'] && onCurrentForecastHourChange) onCurrentForecastHourChange(0, data);
       return;
     }
-
-    let cancelled = false;
-    const bp = boundsRef.current;
-
-    const start = async () => {
-      setIsLoading(true);
-      setPrefetchComplete(false);
-      debugLog('info', 'CURRENT', 'Triggering current forecast prefetch...');
-      try {
-        await apiClient.triggerCurrentForecastPrefetch(bp);
-        const poll = async () => {
-          if (cancelled) return;
-          try {
-            const st = await apiClient.getCurrentForecastStatus(bp);
-            setLoadProgress({ cached: st.cached_hours, total: st.total_hours });
-            if (st.complete || st.cached_hours === st.total_hours) {
-              if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
-              await loadCurrentFrames();
-            }
-          } catch (e) { debugLog('error', 'CURRENT', `Current forecast poll failed: ${e}`); }
-        };
-        await poll();
-        pollIntervalRef.current = setInterval(poll, 5000);
-      } catch (e) {
-        debugLog('error', 'CURRENT', `Current forecast prefetch trigger failed: ${e}`);
-        setIsLoading(false);
-      }
-    };
-
-    start();
-    return () => { cancelled = true; if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; } };
-  }, [visible, isCurrentMode, hasBounds, loadCurrentFrames]);
+    setIsLoading(true);
+    setPrefetchComplete(false);
+    loadCurrentFrames();
+  }, [visible, isCurrentMode, hasBounds, boundsKey, loadCurrentFrames]);
 
   // ------------------------------------------------------------------
   // Ice forecast: load all frames
@@ -391,7 +386,7 @@ export default function ForecastTimeline({
     try {
       debugLog('info', 'ICE', 'Loading ice forecast frames from API...');
       const t0 = performance.now();
-      const bp = boundsRef.current ?? {};
+      const bp = paddedBounds();
       const data: IceForecastFrames = await apiClient.getIceForecastFrames(bp);
       const dt = ((performance.now() - t0) / 1000).toFixed(1);
       const frameKeys = Object.keys(data.frames);
@@ -426,7 +421,6 @@ export default function ForecastTimeline({
   useEffect(() => {
     if (!visible || !isIceMode || !boundsRef.current) return;
 
-    // Client-side cache hit
     if (iceFrameDataRef.current) {
       const data = iceFrameDataRef.current;
       setAvailableHours(deriveHoursFromFrames(data.frames));
@@ -435,46 +429,41 @@ export default function ForecastTimeline({
       if (data.frames['0'] && onIceForecastHourChange) onIceForecastHourChange(0, data);
       return;
     }
+    setIsLoading(true);
+    setPrefetchComplete(false);
+    loadIceFrames();
+  }, [visible, isIceMode, hasBounds, boundsKey, loadIceFrames]);
 
-    let cancelled = false;
-    const bp = boundsRef.current;
-
-    const start = async () => {
-      setIsLoading(true);
-      setPrefetchComplete(false);
-      debugLog('info', 'ICE', 'Triggering ice forecast prefetch...');
-      try {
-        await apiClient.triggerIceForecastPrefetch(bp);
-        const poll = async () => {
-          if (cancelled) return;
-          try {
-            const st = await apiClient.getIceForecastStatus(bp);
-            setLoadProgress({ cached: st.cached_hours, total: st.total_hours });
-            if (st.complete || st.cached_hours === st.total_hours) {
-              if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
-              await loadIceFrames();
-            }
-          } catch (e) { debugLog('error', 'ICE', `Ice forecast poll failed: ${e}`); }
-        };
-        await poll();
-        pollIntervalRef.current = setInterval(poll, 5000);
-      } catch (e) {
-        debugLog('error', 'ICE', `Ice forecast prefetch trigger failed: ${e}`);
-        setIsLoading(false);
+  // ------------------------------------------------------------------
+  // Swell prefetch effect (reuses wave data — swell is embedded in wave frames)
+  // Loads wave frames into cache but fires onSwellForecastHourChange (NOT wave callback)
+  // ------------------------------------------------------------------
+  const loadSwellFrames = useCallback(async () => {
+    try {
+      debugLog('info', 'SWELL', 'Loading swell (wave) forecast frames from API...');
+      const t0 = performance.now();
+      const bp = paddedBounds();
+      const data: WaveForecastFrames = await apiClient.getWaveForecastFrames(bp);
+      const dt = ((performance.now() - t0) / 1000).toFixed(1);
+      const frameKeys = Object.keys(data.frames);
+      debugLog('info', 'SWELL', `Loaded ${frameKeys.length} frames in ${dt}s, grid=${data.ny}x${data.nx}`);
+      setWaveFrameData(data);
+      setAvailableHours(deriveHoursFromFrames(data.frames));
+      setPrefetchComplete(true);
+      setIsLoading(false);
+      if (data.frames['0'] && onSwellForecastHourChange) {
+        debugLog('info', 'SWELL', 'Setting initial swell frame T+0h');
+        onSwellForecastHourChange(0, data);
       }
-    };
+    } catch (e) {
+      debugLog('error', 'SWELL', `Failed to load swell forecast frames: ${e}`);
+      setIsLoading(false);
+    }
+  }, [onSwellForecastHourChange]);
 
-    start();
-    return () => { cancelled = true; if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; } };
-  }, [visible, isIceMode, hasBounds, loadIceFrames]);
-
-  // ------------------------------------------------------------------
-  // Swell prefetch effect (reuses wave pipeline — swell is embedded in wave frames)
-  // ------------------------------------------------------------------
   useEffect(() => {
     if (!visible || !isSwellMode || !boundsRef.current) return;
 
-    // Client-side cache hit (swell reuses wave frames)
     if (waveFrameDataRef.current) {
       const data = waveFrameDataRef.current;
       setAvailableHours(deriveHoursFromFrames(data.frames));
@@ -483,38 +472,10 @@ export default function ForecastTimeline({
       if (data.frames['0'] && onSwellForecastHourChange) onSwellForecastHourChange(0, data);
       return;
     }
-
-    let cancelled = false;
-    const bp = boundsRef.current;
-
-    const start = async () => {
-      setIsLoading(true);
-      setPrefetchComplete(false);
-      debugLog('info', 'SWELL', 'Triggering wave prefetch for swell data...');
-      try {
-        await apiClient.triggerWaveForecastPrefetch(bp);
-        const poll = async () => {
-          if (cancelled) return;
-          try {
-            const st = await apiClient.getWaveForecastStatus(bp);
-            setLoadProgress({ cached: st.cached_hours, total: st.total_hours });
-            if (st.complete || st.cached_hours === st.total_hours) {
-              if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
-              await loadWaveFrames();
-            }
-          } catch (e) { debugLog('error', 'SWELL', `Wave/swell forecast poll failed: ${e}`); }
-        };
-        await poll();
-        pollIntervalRef.current = setInterval(poll, 5000);
-      } catch (e) {
-        debugLog('error', 'SWELL', `Wave/swell forecast prefetch trigger failed: ${e}`);
-        setIsLoading(false);
-      }
-    };
-
-    start();
-    return () => { cancelled = true; if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; } };
-  }, [visible, isSwellMode, hasBounds, loadWaveFrames]);
+    setIsLoading(true);
+    setPrefetchComplete(false);
+    loadSwellFrames();
+  }, [visible, isSwellMode, hasBounds, boundsKey, loadSwellFrames]);
 
   // ------------------------------------------------------------------
   // SST forecast: load all frames
@@ -523,7 +484,7 @@ export default function ForecastTimeline({
     try {
       debugLog('info', 'SST', 'Loading SST forecast frames from API...');
       const t0 = performance.now();
-      const bp = boundsRef.current ?? {};
+      const bp = paddedBounds();
       const data: SstForecastFrames = await apiClient.getSstForecastFrames(bp);
       const dt = ((performance.now() - t0) / 1000).toFixed(1);
       const frameKeys = Object.keys(data.frames);
@@ -567,38 +528,10 @@ export default function ForecastTimeline({
       if (data.frames['0'] && onSstForecastHourChange) onSstForecastHourChange(0, data);
       return;
     }
-
-    let cancelled = false;
-    const bp = boundsRef.current;
-
-    const start = async () => {
-      setIsLoading(true);
-      setPrefetchComplete(false);
-      debugLog('info', 'SST', 'Triggering SST forecast prefetch...');
-      try {
-        await apiClient.triggerSstForecastPrefetch(bp);
-        const poll = async () => {
-          if (cancelled) return;
-          try {
-            const st = await apiClient.getSstForecastStatus(bp);
-            setLoadProgress({ cached: st.cached_hours, total: st.total_hours });
-            if (st.complete || st.cached_hours === st.total_hours) {
-              if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
-              await loadSstFrames();
-            }
-          } catch (e) { debugLog('error', 'SST', `SST forecast poll failed: ${e}`); }
-        };
-        await poll();
-        pollIntervalRef.current = setInterval(poll, 5000);
-      } catch (e) {
-        debugLog('error', 'SST', `SST forecast prefetch trigger failed: ${e}`);
-        setIsLoading(false);
-      }
-    };
-
-    start();
-    return () => { cancelled = true; if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; } };
-  }, [visible, isSstMode, hasBounds, loadSstFrames]);
+    setIsLoading(true);
+    setPrefetchComplete(false);
+    loadSstFrames();
+  }, [visible, isSstMode, hasBounds, boundsKey, loadSstFrames]);
 
   // ------------------------------------------------------------------
   // Visibility forecast: load all frames
@@ -607,7 +540,7 @@ export default function ForecastTimeline({
     try {
       debugLog('info', 'VIS', 'Loading visibility forecast frames from API...');
       const t0 = performance.now();
-      const bp = boundsRef.current ?? {};
+      const bp = paddedBounds();
       const data: VisForecastFrames = await apiClient.getVisForecastFrames(bp);
       const dt = ((performance.now() - t0) / 1000).toFixed(1);
       const frameKeys = Object.keys(data.frames);
@@ -637,7 +570,7 @@ export default function ForecastTimeline({
   }, [onVisForecastHourChange]);
 
   // ------------------------------------------------------------------
-  // Visibility prefetch effect
+  // Visibility prefetch effect (direct load — /frames extracts on-the-fly)
   // ------------------------------------------------------------------
   useEffect(() => {
     if (!visible || !isVisMode || !boundsRef.current) return;
@@ -652,37 +585,10 @@ export default function ForecastTimeline({
       return;
     }
 
-    let cancelled = false;
-    const bp = boundsRef.current;
-
-    const start = async () => {
-      setIsLoading(true);
-      setPrefetchComplete(false);
-      debugLog('info', 'VIS', 'Triggering visibility forecast prefetch...');
-      try {
-        await apiClient.triggerVisForecastPrefetch(bp);
-        const poll = async () => {
-          if (cancelled) return;
-          try {
-            const st = await apiClient.getVisForecastStatus(bp);
-            setLoadProgress({ cached: st.cached_hours, total: st.total_hours });
-            if (st.complete || st.cached_hours === st.total_hours) {
-              if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
-              await loadVisFrames();
-            }
-          } catch (e) { debugLog('error', 'VIS', `Visibility forecast poll failed: ${e}`); }
-        };
-        await poll();
-        pollIntervalRef.current = setInterval(poll, 5000);
-      } catch (e) {
-        debugLog('error', 'VIS', `Visibility forecast prefetch trigger failed: ${e}`);
-        setIsLoading(false);
-      }
-    };
-
-    start();
-    return () => { cancelled = true; if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; } };
-  }, [visible, isVisMode, hasBounds, loadVisFrames]);
+    setIsLoading(true);
+    setPrefetchComplete(false);
+    loadVisFrames();
+  }, [visible, isVisMode, hasBounds, boundsKey, loadVisFrames]);
 
   // ------------------------------------------------------------------
   // Play/pause

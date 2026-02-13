@@ -20,6 +20,7 @@ const api = axios.create({
 export interface Position {
   lat: number;
   lon: number;
+  name?: string;
 }
 
 export interface WaypointData {
@@ -1122,6 +1123,16 @@ export const apiClient = {
 
   async getIceField(params: { lat_min?: number; lat_max?: number; lon_min?: number; lon_max?: number; resolution?: number; db_only?: boolean } = {}): Promise<GridFieldData> {
     const response = await api.get<GridFieldData>('/api/weather/ice', { params });
+    return response.data;
+  },
+
+  async getWeatherFreshness(): Promise<{
+    status: string;
+    age_hours: number | null;
+    color: string;
+    message?: string;
+  }> {
+    const response = await api.get('/api/weather/freshness');
     return response.data;
   },
 

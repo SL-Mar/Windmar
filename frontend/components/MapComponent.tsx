@@ -53,6 +53,10 @@ const MapViewportProvider = dynamic(
   () => import('@/components/MapViewportProvider'),
   { ssr: false }
 );
+const FitBoundsHandler = dynamic(
+  () => import('@/components/FitBoundsHandler'),
+  { ssr: false }
+);
 const Polyline = dynamic(
   () => import('react-leaflet').then((mod) => mod.Polyline),
   { ssr: false }
@@ -97,6 +101,8 @@ export interface MapComponentProps {
   viewportBounds?: { lat_min: number; lat_max: number; lon_min: number; lon_max: number } | null;
   weatherModelLabel?: string;
   extendedWeatherData?: any;
+  fitBounds?: [[number, number], [number, number]] | null;
+  fitKey?: number;
   children?: React.ReactNode;
 }
 
@@ -130,6 +136,8 @@ export default function MapComponent({
   viewportBounds = null,
   weatherModelLabel,
   extendedWeatherData = null,
+  fitBounds: fitBoundsProp = null,
+  fitKey = 0,
   children,
 }: MapComponentProps) {
   const [isMounted, setIsMounted] = useState(false);
@@ -167,6 +175,9 @@ export default function MapComponent({
 
         {/* Viewport tracker */}
         {onViewportChange && <MapViewportProvider onViewportChange={onViewportChange} />}
+
+        {/* Fit bounds handler */}
+        <FitBoundsHandler bounds={fitBoundsProp} fitKey={fitKey} />
 
         {/* Zone Layer */}
         {showZones && <ZoneLayer key={zoneKey} visible={showZones} visibleTypes={visibleZoneTypes} />}
