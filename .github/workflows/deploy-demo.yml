@@ -1,0 +1,84 @@
+name: Deploy Demo
+
+  on:
+    push:
+      branches: [main]
+    workflow_dispatch:
+
+  env:
+    REGISTRY: ghcr.io
+    IMAGE_PREFIX: ${{ github.repository }}
+
+  jobs:
+    build:
+      runs-on: ubuntu-latest
+      permissions:
+        contents: read
+        packages: write
+
+      steps:
+        - uses: actions/checkout@v4
+
+        - uses: docker/login-action@v3
+          with:
+            registry: ${{ env.REGISTRY }}
+            username: ${{ github.actor }}
+            password: ${{ secrets.GITHUB_TOKEN }}
+
+        - uses: docker/setup-buildx-action@v3
+
+        - uses: docker/build-push-action@v6
+          with:
+            context: .
+            push: true
+            tags: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-api:demo
+            cache-from: type=gha
+            cache-to: type=gha,mode=max
+
+        - uses: docker/build-push-action@v6
+          with:
+            context: ./frontend
+            push: true
+            tags: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-frontend:demo
+            build-args: |
+              NEXT_PUBLIC_API_URL=${{ secrets.DEMO_API_URL }}
+              NEXT_PUBLIC_DEMO_MODE=true
+            cache-from: type=gha
+            cache-to: type=gha,mode=max
+
+    deploy:
+      needs: build
+      runs-on: ubuntu-latest
+      if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
+      steps:
+        - uses: actions/checkout@v4
+
+        - name: Copy compose files to VPS
+          uses: appleboy/scp-action@v0.1.7
+          with:
+            host: ${{ secrets.DEMO_VPS_HOST }}
+            username: ${{ secrets.DEMO_VPS_USER }}
+            key: ${{ secrets.DEMO_VPS_SSH_KEY }}
+            source: "docker-compose.yml,docker-compose.demo.yml,docker/init-db.sql"
+            target: ~/windmar
+
+        - name: Deploy on VPS
+          uses: appleboy/ssh-action@v1.0.3
+          with:
+            host: ${{ secrets.DEMO_VPS_HOST }}
+            username: ${{ secrets.DEMO_VPS_USER }}
+            key: ${{ secrets.DEMO_VPS_SSH_KEY }}
+            script: |
+              cd ~/windmar
+              echo "REGISTRY=${{ env.REGISTRY }}" > .env.deploy
+              echo "IMAGE_PREFIX=${{ env.IMAGE_PREFIX }}" >> .env.deploy
+              echo "API_SECRET_KEY=${{ secrets.DEMO_API_SECRET }}" >> .env.deploy
+
+              docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-api:demo
+              docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-frontend:demo
+
+              docker compose -f docker-compose.yml -f docker-compose.demo.yml down
+              docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d
+
+              docker image prune -f
