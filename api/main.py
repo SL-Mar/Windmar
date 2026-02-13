@@ -1552,8 +1552,8 @@ _prefetch_lock = None  # Will be a threading.Lock
 _last_wind_prefetch_run = None  # (run_date, run_hour) tuple from last successful prefetch
 
 # File-based cache for wind forecast frames (shared across gunicorn workers)
-_WIND_CACHE_DIR = Path("/tmp/windmar_wind_cache")
-_WIND_CACHE_DIR.mkdir(exist_ok=True)
+_WIND_CACHE_DIR = Path("/tmp/windmar_cache/wind")
+_WIND_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _wind_cache_key(lat_min, lat_max, lon_min, lon_max):
@@ -1809,8 +1809,8 @@ def _get_wave_prefetch_lock():
     return _wave_prefetch_lock
 
 # File-based cache for wave forecast frames (shared across workers)
-_WAVE_CACHE_DIR = Path("/tmp/windmar_wave_cache")
-_WAVE_CACHE_DIR.mkdir(exist_ok=True)
+_WAVE_CACHE_DIR = Path("/tmp/windmar_cache/wave")
+_WAVE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 def _wave_cache_path(cache_key: str) -> Path:
     return _WAVE_CACHE_DIR / f"{cache_key}.json"
@@ -2252,8 +2252,8 @@ async def api_get_wave_forecast_frames(
 
 _current_prefetch_running = False
 _current_prefetch_lock = None
-_CURRENT_CACHE_DIR = Path("/tmp/windmar_current_cache")
-_CURRENT_CACHE_DIR.mkdir(exist_ok=True)
+_CURRENT_CACHE_DIR = Path("/tmp/windmar_cache/current")
+_CURRENT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 _REDIS_CURRENT_PREFETCH_LOCK = "windmar:current_prefetch_lock"
 _REDIS_CURRENT_PREFETCH_STATUS = "windmar:current_prefetch_running"
@@ -2496,8 +2496,8 @@ async def api_get_current_forecast_frames(
 
 _ice_prefetch_running = False
 _ice_prefetch_lock = None
-_ICE_CACHE_DIR = Path("/tmp/windmar_ice_cache")
-_ICE_CACHE_DIR.mkdir(exist_ok=True)
+_ICE_CACHE_DIR = Path("/tmp/windmar_cache/ice")
+_ICE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 _REDIS_ICE_PREFETCH_LOCK = "windmar:ice_prefetch_lock"
 _REDIS_ICE_PREFETCH_STATUS = "windmar:ice_prefetch_running"
@@ -2804,8 +2804,8 @@ async def api_get_ice_forecast_frames(
 
 _sst_prefetch_running = False
 _sst_prefetch_lock = None
-_SST_CACHE_DIR = Path("/tmp/windmar_sst_cache")
-_SST_CACHE_DIR.mkdir(exist_ok=True)
+_SST_CACHE_DIR = Path("/tmp/windmar_cache/sst")
+_SST_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 _REDIS_SST_PREFETCH_LOCK = "windmar:sst_prefetch_lock"
 _REDIS_SST_PREFETCH_STATUS = "windmar:sst_prefetch_running"
@@ -3026,8 +3026,8 @@ async def api_get_sst_forecast_frames(
 
 _vis_prefetch_running = False
 _vis_prefetch_lock = None
-_VIS_CACHE_DIR = Path("/tmp/windmar_vis_cache")
-_VIS_CACHE_DIR.mkdir(exist_ok=True)
+_VIS_CACHE_DIR = Path("/tmp/windmar_cache/vis")
+_VIS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 _REDIS_VIS_PREFETCH_LOCK = "windmar:vis_prefetch_lock"
 _REDIS_VIS_PREFETCH_STATUS = "windmar:vis_prefetch_running"

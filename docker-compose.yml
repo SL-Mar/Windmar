@@ -68,6 +68,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+      - forecast_cache:/tmp/windmar_cache
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
@@ -114,6 +115,8 @@ volumes:
   postgres_data:
     driver: local
   redis_data:
+    driver: local
+  forecast_cache:
     driver: local
 
 networks:
