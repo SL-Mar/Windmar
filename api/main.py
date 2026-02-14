@@ -88,10 +88,40 @@ from src.routes.rtz_parser import (
 )
 from src.data.land_mask import is_ocean
 
-
 # Vectorized ocean mask using global-land-mask's numpy support
+_ocean_mask_cache: Dict[str, tuple] = {}
+
+# Demo response cache: stores serialized JSON bytes for static weather endpoints.
+# In demo mode data never changes, so responses can be cached indefinitely.
+_demo_response_cache: Dict[str, bytes] = {}
+
+
+def _demo_cache_get(key: str):
+    """Return cached Response if in demo mode, else None."""
+    if is_demo() and key in _demo_response_cache:
+        from starlette.responses import Response as _Resp
+
+        return _Resp(content=_demo_response_cache[key], media_type="application/json")
+    return None
+
+
+def _demo_cache_put(key: str, response_obj):
+    """Cache serialized JSON in demo mode (dict or list)."""
+    if is_demo():
+        import json as _json
+
+        _demo_response_cache[key] = _json.dumps(response_obj).encode()
+
+
 def _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05):
-    """Build high-res ocean mask using vectorized numpy calls (fast)."""
+    """Build high-res ocean mask using vectorized numpy calls (fast).
+
+    Results are cached by bounding box since the land/ocean boundary is static.
+    """
+    cache_key = f"{lat_min:.2f}_{lat_max:.2f}_{lon_min:.2f}_{lon_max:.2f}_{step}"
+    if cache_key in _ocean_mask_cache:
+        return _ocean_mask_cache[cache_key]
+
     mask_lats = np.arange(lat_min, lat_max + step / 2, step)
     mask_lons = np.arange(lon_min, lon_max + step / 2, step)
     lon_grid, lat_grid = np.meshgrid(mask_lons, mask_lats)
@@ -99,14 +129,17 @@ def _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05):
         from global_land_mask import globe
 
         mask = globe.is_ocean(lat_grid, lon_grid)
-        return mask_lats.tolist(), mask_lons.tolist(), mask.tolist()
+        result = mask_lats.tolist(), mask_lons.tolist(), mask.tolist()
     except ImportError:
         # Fallback to point-by-point (slow)
         mask = [
             [is_ocean(round(float(lat), 2), round(float(lon), 2)) for lon in mask_lons]
             for lat in mask_lats
         ]
-        return mask_lats.tolist(), mask_lons.tolist(), mask
+        result = mask_lats.tolist(), mask_lons.tolist(), mask
+
+    _ocean_mask_cache[cache_key] = result
+    return result
 
 
 from src.data.copernicus import (
@@ -1574,6 +1607,11 @@ async def api_get_wind_field(
     Uses Copernicus CDS when available, falls back to synthetic data.
     If db_only=true, only queries PostgreSQL (no external API calls).
     """
+    cache_key = f"wind:{lat_min},{lat_max},{lon_min},{lon_max},{resolution}"
+    cached = _demo_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     if time is None:
         time = datetime.utcnow()
 
@@ -1635,6 +1673,7 @@ async def api_get_wind_field(
             "data": sst_data.values.tolist(),
             "unit": "°C",
         }
+    _demo_cache_put(cache_key, response)
     return response
 
 
@@ -1656,6 +1695,11 @@ async def api_get_wind_velocity_format(
     Uses GFS near-real-time data. Pass forecast_hour (0-120, step 3) for forecast frames.
     If db_only=true, only queries PostgreSQL (no external API calls).
     """
+    vel_cache_key = f"wind_vel:{lat_min},{lat_max},{lon_min},{lon_max},{resolution},{forecast_hour}"
+    cached = _demo_cache_get(vel_cache_key)
+    if cached is not None:
+        return cached
+
     if time is None:
         time = datetime.utcnow()
 
@@ -1738,10 +1782,12 @@ async def api_get_wind_velocity_format(
     u_flat = u_ordered.flatten().tolist()
     v_flat = v_ordered.flatten().tolist()
 
-    return [
+    result = [
         {"header": {**header, "parameterNumber": 2}, "data": u_flat},
         {"header": {**header, "parameterNumber": 3}, "data": v_flat},
     ]
+    _demo_cache_put(vel_cache_key, result)
+    return result
 
 
 # ============================================================================
@@ -2081,10 +2127,18 @@ async def api_get_forecast_frames(
     """
     from starlette.responses import Response
 
+    demo_key = f"wind_frames:{lat_min},{lat_max},{lon_min},{lon_max}"
+    demo_cached = _demo_cache_get(demo_key)
+    if demo_cached is not None:
+        return demo_cached
+
     cache_key = _wind_cache_key(lat_min, lat_max, lon_min, lon_max)
     cache_file = _WIND_CACHE_DIR / f"{cache_key}.json"
     if cache_file.exists():
-        return Response(content=cache_file.read_bytes(), media_type="application/json")
+        raw = cache_file.read_bytes()
+        if is_demo():
+            _demo_response_cache[demo_key] = raw
+        return Response(content=raw, media_type="application/json")
 
     # Fallback: rebuild from PostgreSQL
     cached = await asyncio.to_thread(
@@ -2092,6 +2146,7 @@ async def api_get_forecast_frames(
     )
 
     if cached:
+        _demo_cache_put(demo_key, cached)
         return cached
 
     # No DB data either — return empty
@@ -2625,12 +2680,18 @@ async def api_get_wave_forecast_frames(
     """
     from starlette.responses import Response as RawResponse
 
+    demo_key = f"wave_frames:{lat_min},{lat_max},{lon_min},{lon_max}"
+    demo_cached = _demo_cache_get(demo_key)
+    if demo_cached is not None:
+        return demo_cached
+
     cache_key = f"wave_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
     cache_file = _wave_cache_path(cache_key)
     if cache_file.exists():
-        return RawResponse(
-            content=cache_file.read_bytes(), media_type="application/json"
-        )
+        raw = cache_file.read_bytes()
+        if is_demo():
+            _demo_response_cache[demo_key] = raw
+        return RawResponse(content=raw, media_type="application/json")
 
     # Fallback: rebuild from PostgreSQL
     cached = await asyncio.to_thread(
@@ -2651,6 +2712,7 @@ async def api_get_wave_forecast_frames(
             "frames": {},
         }
 
+    _demo_cache_put(demo_key, cached)
     return cached
 
 
@@ -2922,12 +2984,18 @@ async def api_get_current_forecast_frames(
     """
     from starlette.responses import Response as RawResponse
 
+    demo_key = f"current_frames:{lat_min},{lat_max},{lon_min},{lon_max}"
+    demo_cached = _demo_cache_get(demo_key)
+    if demo_cached is not None:
+        return demo_cached
+
     cache_key = f"current_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
     cache_file = _current_cache_path(cache_key)
     if cache_file.exists():
-        return RawResponse(
-            content=cache_file.read_bytes(), media_type="application/json"
-        )
+        raw = cache_file.read_bytes()
+        if is_demo():
+            _demo_response_cache[demo_key] = raw
+        return RawResponse(content=raw, media_type="application/json")
 
     # Fallback: rebuild from PostgreSQL
     cached = await asyncio.to_thread(
@@ -2947,6 +3015,7 @@ async def api_get_current_forecast_frames(
             "frames": {},
         }
 
+    _demo_cache_put(demo_key, cached)
     return cached
 
 
@@ -3284,12 +3353,18 @@ async def api_get_ice_forecast_frames(
     """
     from starlette.responses import Response as RawResponse
 
+    demo_key = f"ice_frames:{lat_min},{lat_max},{lon_min},{lon_max}"
+    demo_cached = _demo_cache_get(demo_key)
+    if demo_cached is not None:
+        return demo_cached
+
     cache_key = f"ice_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
     cache_file = _ice_cache_path(cache_key)
     if cache_file.exists():
-        return RawResponse(
-            content=cache_file.read_bytes(), media_type="application/json"
-        )
+        raw = cache_file.read_bytes()
+        if is_demo():
+            _demo_response_cache[demo_key] = raw
+        return RawResponse(content=raw, media_type="application/json")
 
     # Fallback: rebuild from PostgreSQL
     cached = await asyncio.to_thread(
@@ -3309,6 +3384,7 @@ async def api_get_ice_forecast_frames(
             "frames": {},
         }
 
+    _demo_cache_put(demo_key, cached)
     return cached
 
 
@@ -3566,12 +3642,18 @@ async def api_get_sst_forecast_frames(
     """
     from starlette.responses import Response as RawResponse
 
+    demo_key = f"sst_frames:{lat_min},{lat_max},{lon_min},{lon_max}"
+    demo_cached = _demo_cache_get(demo_key)
+    if demo_cached is not None:
+        return demo_cached
+
     cache_key = f"sst_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
     cache_file = _sst_cache_path(cache_key)
     if cache_file.exists():
-        return RawResponse(
-            content=cache_file.read_bytes(), media_type="application/json"
-        )
+        raw = cache_file.read_bytes()
+        if is_demo():
+            _demo_response_cache[demo_key] = raw
+        return RawResponse(content=raw, media_type="application/json")
 
     return {
         "run_time": "",
@@ -3875,6 +3957,11 @@ async def api_get_wave_field(
     Uses Copernicus CMEMS when available, falls back to synthetic data.
     If db_only=true, only queries PostgreSQL (no external API calls).
     """
+    cache_key = f"waves:{lat_min},{lat_max},{lon_min},{lon_max},{resolution}"
+    cached = _demo_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     if time is None:
         time = datetime.utcnow()
 
@@ -3965,6 +4052,7 @@ async def api_get_wave_field(
             ),
         }
 
+    _demo_cache_put(cache_key, response)
     return response
 
 
@@ -3982,12 +4070,17 @@ async def api_get_current_field(
 
     Uses Copernicus CMEMS when available, falls back to synthetic data.
     """
+    cache_key = f"currents:{lat_min},{lat_max},{lon_min},{lon_max},{resolution}"
+    cached = _demo_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     if time is None:
         time = datetime.utcnow()
 
     current_data = get_current_field(lat_min, lat_max, lon_min, lon_max, resolution)
 
-    return {
+    response = {
         "parameter": "current",
         "time": time.isoformat(),
         "available": True,
@@ -4017,6 +4110,8 @@ async def api_get_current_field(
             "copernicus" if copernicus_provider._has_copernicusmarine else "synthetic"
         ),
     }
+    _demo_cache_put(cache_key, response)
+    return response
 
 
 @app.get("/api/weather/currents/velocity")
@@ -4035,6 +4130,11 @@ async def api_get_current_velocity_format(
     Returns array of [U-component, V-component] data with headers.
     If db_only=true, only queries PostgreSQL (no external API calls).
     """
+    vel_cache_key = f"current_vel:{lat_min},{lat_max},{lon_min},{lon_max},{resolution}"
+    cached = _demo_cache_get(vel_cache_key)
+    if cached is not None:
+        return cached
+
     if time is None:
         time = datetime.utcnow()
 
@@ -4100,10 +4200,12 @@ async def api_get_current_velocity_format(
     u_flat = u_ordered.flatten().tolist()
     v_flat = v_ordered.flatten().tolist()
 
-    return [
+    result = [
         {"header": {**header, "parameterNumber": 2}, "data": u_flat},
         {"header": {**header, "parameterNumber": 3}, "data": v_flat},
     ]
+    _demo_cache_put(vel_cache_key, result)
+    return result
 
 
 @app.get("/api/weather/point")
@@ -4162,6 +4264,11 @@ async def api_get_sst_field(
     Returns SST grid in degrees Celsius.
     Uses CMEMS physics when available, falls back to synthetic data.
     """
+    cache_key = f"sst:{lat_min},{lat_max},{lon_min},{lon_max},{resolution}"
+    cached = _demo_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     if time is None:
         time = datetime.utcnow()
 
@@ -4171,7 +4278,7 @@ async def api_get_sst_field(
         lat_min, lat_max, lon_min, lon_max, step=0.05
     )
 
-    return {
+    response = {
         "parameter": "sst",
         "time": time.isoformat(),
         "bbox": {
@@ -4206,6 +4313,8 @@ async def api_get_sst_field(
             ],
         },
     }
+    _demo_cache_put(cache_key, response)
+    return response
 
 
 @app.get("/api/weather/visibility")
@@ -4223,6 +4332,11 @@ async def api_get_visibility_field(
     Returns visibility grid in kilometers.
     Uses GFS when available, falls back to synthetic data.
     """
+    cache_key = f"visibility:{lat_min},{lat_max},{lon_min},{lon_max},{resolution}"
+    cached = _demo_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     if time is None:
         time = datetime.utcnow()
 
@@ -4234,7 +4348,7 @@ async def api_get_visibility_field(
         lat_min, lat_max, lon_min, lon_max, step=0.05
     )
 
-    return {
+    response = {
         "parameter": "visibility",
         "time": time.isoformat(),
         "bbox": {
@@ -4260,6 +4374,8 @@ async def api_get_visibility_field(
             "colors": ["#ff0000", "#ff8800", "#ffff00", "#88ff00", "#00ff00"],
         },
     }
+    _demo_cache_put(cache_key, response)
+    return response
 
 
 @app.get("/api/weather/ice")
@@ -4280,6 +4396,11 @@ async def api_get_ice_field(
     Only relevant for high-latitude regions (>55°).
     If db_only=true, only queries PostgreSQL (no external API calls).
     """
+    cache_key = f"ice:{lat_min},{lat_max},{lon_min},{lon_max},{resolution}"
+    cached = _demo_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     if time is None:
         time = datetime.utcnow()
 
@@ -4296,7 +4417,7 @@ async def api_get_ice_field(
         lat_min, lat_max, lon_min, lon_max, step=0.05
     )
 
-    return {
+    response = {
         "parameter": "ice_concentration",
         "time": time.isoformat(),
         "bbox": {
@@ -4324,6 +4445,8 @@ async def api_get_ice_field(
             "colors": ["#ffffff", "#ccddff", "#6688ff", "#0033cc", "#001166"],
         },
     }
+    _demo_cache_put(cache_key, response)
+    return response
 
 
 @app.get("/api/weather/swell")
@@ -4341,6 +4464,11 @@ async def api_get_swell_field(
     Returns swell and wind-sea decomposition from CMEMS wave data.
     Same query params as /api/weather/waves.
     """
+    cache_key = f"swell:{lat_min},{lat_max},{lon_min},{lon_max},{resolution}"
+    cached = _demo_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     if time is None:
         time = datetime.utcnow()
 
@@ -4377,7 +4505,7 @@ async def api_get_swell_field(
         else None
     )
 
-    return {
+    response = {
         "parameter": "swell",
         "time": time.isoformat(),
         "bbox": {
@@ -4406,6 +4534,8 @@ async def api_get_swell_field(
         "ocean_mask_lons": mask_lons,
         "source": "copernicus" if has_decomposition else "synthetic",
     }
+    _demo_cache_put(cache_key, response)
+    return response
 
 
 # ============================================================================
