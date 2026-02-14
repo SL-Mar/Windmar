@@ -73,8 +73,10 @@ services:
     container_name: windmar-caddy
     ports:
       - "80:80"
+      - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
     depends_on:
       - api
       - frontend
@@ -86,4 +88,6 @@ services:
 
 volumes:
   postgres_data:
+    driver: local
+  caddy_data:
     driver: local
