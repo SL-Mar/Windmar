@@ -57,6 +57,7 @@ services:
   frontend:
     image: ghcr.io/sl-mar/windmar-frontend:demo
     container_name: windmar-frontend
+    init: true
     expose:
       - "3000"
     depends_on:
