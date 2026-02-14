@@ -2004,6 +2004,67 @@ async def api_trigger_forecast_prefetch(
     return {"status": "started", "message": "Prefetch triggered in background"}
 
 
+def _rebuild_wind_cache_from_db(cache_key, lat_min, lat_max, lon_min, lon_max):
+    """Rebuild wind forecast file cache from PostgreSQL data."""
+    if db_weather is None:
+        return None
+
+    run_time, hours = db_weather.get_available_hours_by_source("gfs")
+    if not hours:
+        return None
+
+    logger.info(f"Rebuilding wind cache from DB: {len(hours)} hours")
+
+    grids = db_weather.get_grids_for_timeline(
+        "gfs", ["wind_u", "wind_v"], lat_min, lat_max, lon_min, lon_max, hours
+    )
+
+    if not grids or "wind_u" not in grids or not grids["wind_u"]:
+        return None
+
+    first_fh = min(grids["wind_u"].keys())
+    lats_full, lons_full, _ = grids["wind_u"][first_fh]
+    max_dim = max(len(lats_full), len(lons_full))
+    STEP = max(1, round(max_dim / 250))
+    shared_lats = lats_full[::STEP].tolist()
+    shared_lons = lons_full[::STEP].tolist()
+
+    mask_lats_arr, mask_lons_arr, ocean_mask_arr = _build_ocean_mask(
+        lat_min, lat_max, lon_min, lon_max
+    )
+
+    frames = {}
+    for fh in sorted(hours):
+        if fh in grids["wind_u"] and fh in grids["wind_v"]:
+            _, _, u_data = grids["wind_u"][fh]
+            _, _, v_data = grids["wind_v"][fh]
+            frames[str(fh)] = {
+                "u": np.round(u_data[::STEP, ::STEP], 2).tolist(),
+                "v": np.round(v_data[::STEP, ::STEP], 2).tolist(),
+            }
+
+    cache_data = {
+        "run_date": run_time.strftime("%Y%m%d") if run_time else "",
+        "run_hour": run_time.strftime("%H") if run_time else "00",
+        "run_time": run_time.isoformat() if run_time else "",
+        "total_hours": len(frames),
+        "cached_hours": len(frames),
+        "source": "gfs",
+        "lats": shared_lats,
+        "lons": shared_lons,
+        "ny": len(shared_lats),
+        "nx": len(shared_lons),
+        "ocean_mask": ocean_mask_arr,
+        "ocean_mask_lats": mask_lats_arr,
+        "ocean_mask_lons": mask_lons_arr,
+        "frames": frames,
+    }
+
+    _wind_cache_put(cache_key, cache_data)
+    logger.info(f"Wind cache rebuilt from DB: {len(frames)} frames")
+    return cache_data
+
+
 @app.get("/api/weather/forecast/frames")
 async def api_get_forecast_frames(
     lat_min: float = Query(30.0),
@@ -2016,6 +2077,7 @@ async def api_get_forecast_frames(
 
     The cache is built once during prefetch. No GRIB parsing happens here.
     Serves the raw JSON file to avoid parse+re-serialize overhead.
+    Falls back to PostgreSQL if file cache is missing (demo mode).
     """
     from starlette.responses import Response
 
@@ -2024,7 +2086,15 @@ async def api_get_forecast_frames(
     if cache_file.exists():
         return Response(content=cache_file.read_bytes(), media_type="application/json")
 
-    # No file cache — return empty (prefetch hasn't run or hasn't finished yet)
+    # Fallback: rebuild from PostgreSQL
+    cached = await asyncio.to_thread(
+        _rebuild_wind_cache_from_db, cache_key, lat_min, lat_max, lon_min, lon_max
+    )
+
+    if cached:
+        return cached
+
+    # No DB data either — return empty
     run_date, run_hour = gfs_provider._get_latest_run()
     run_time = datetime.strptime(f"{run_date}{run_hour}", "%Y%m%d%H")
     return {
