@@ -114,10 +114,13 @@ def _demo_cache_put(key: str, response_obj):
 
 
 def _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05):
-    """Build high-res ocean mask using vectorized numpy calls (fast).
+    """Build ocean mask using vectorized numpy calls.
 
+    In demo mode uses 0.5° resolution (100x fewer cells) for fast transfer.
     Results are cached by bounding box since the land/ocean boundary is static.
     """
+    if is_demo():
+        step = 0.5
     cache_key = f"{lat_min:.2f}_{lat_max:.2f}_{lon_min:.2f}_{lon_max:.2f}_{step}"
     if cache_key in _ocean_mask_cache:
         return _ocean_mask_cache[cache_key]
@@ -6207,6 +6210,72 @@ def _is_wave_prefetch_running() -> bool:
     return _wave_prefetch_running
 
 
+async def _demo_warm_caches():
+    """Pre-warm all weather response caches at startup in demo mode.
+
+    Fires every endpoint once so all subsequent requests are instant.
+    Uses the default bounding box (same as frontend defaults).
+    """
+    import time as _time
+
+    bbox = dict(lat_min=30.0, lat_max=60.0, lon_min=-15.0, lon_max=40.0)
+    t0 = _time.monotonic()
+
+    try:
+        # Static endpoints — trigger DB query + ocean mask + serialization
+        await api_get_wind_field(**bbox, resolution=1.0, db_only=True)
+        logger.info("Demo warm: wind cached")
+
+        await api_get_wind_velocity_format(**bbox, resolution=1.0, db_only=True)
+        logger.info("Demo warm: wind velocity cached")
+
+        await api_get_wave_field(**bbox, resolution=1.0, db_only=True)
+        logger.info("Demo warm: waves cached")
+
+        await api_get_current_field(**bbox, resolution=1.0)
+        logger.info("Demo warm: currents cached")
+
+        await api_get_current_velocity_format(**bbox, resolution=1.0, db_only=True)
+        logger.info("Demo warm: current velocity cached")
+
+        await api_get_ice_field(**bbox, resolution=1.0, db_only=True)
+        logger.info("Demo warm: ice cached")
+
+        await api_get_sst_field(**bbox, resolution=1.0)
+        logger.info("Demo warm: sst cached")
+
+        await api_get_visibility_field(**bbox, resolution=1.0)
+        logger.info("Demo warm: visibility cached")
+
+        await api_get_swell_field(**bbox, resolution=1.0)
+        logger.info("Demo warm: swell cached")
+
+        # Forecast frame endpoints — trigger DB fallback + file cache
+        await api_get_forecast_frames(**bbox)
+        logger.info("Demo warm: wind frames cached")
+
+        await api_get_wave_forecast_frames(**bbox)
+        logger.info("Demo warm: wave frames cached")
+
+        await api_get_current_forecast_frames(**bbox)
+        logger.info("Demo warm: current frames cached")
+
+        await api_get_ice_forecast_frames(**bbox)
+        logger.info("Demo warm: ice frames cached")
+
+        await api_get_sst_forecast_frames(**bbox)
+        logger.info("Demo warm: sst frames cached")
+
+        elapsed = _time.monotonic() - t0
+        n = len(_demo_response_cache)
+        total_mb = sum(len(v) for v in _demo_response_cache.values()) / 1_048_576
+        logger.info(
+            f"Demo warm complete: {n} endpoints cached ({total_mb:.1f} MB) in {elapsed:.1f}s"
+        )
+    except Exception as e:
+        logger.error(f"Demo warm failed: {e}")
+
+
 @app.on_event("startup")
 async def startup_event():
     """Run migrations and start background weather ingestion."""
@@ -6214,6 +6283,8 @@ async def startup_event():
 
     if is_demo():
         logger.info("Demo mode active — skipping background weather ingestion")
+        logger.info("Demo mode: pre-warming weather caches in background...")
+        asyncio.create_task(_demo_warm_caches())
         return
 
     # Start background ingestion loop

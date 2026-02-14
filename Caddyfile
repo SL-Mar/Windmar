@@ -1,4 +1,6 @@
 demo-windmar.slmar.co {
+	encode gzip
+
 	handle /api/* {
 		reverse_proxy api:8000
 	}
