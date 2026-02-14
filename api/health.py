@@ -4,6 +4,7 @@ Comprehensive health check module for WINDMAR API.
 Provides detailed health checks for all dependencies and system components.
 Designed for Kubernetes liveness/readiness probes and load balancer health checks.
 """
+
 import logging
 import asyncio
 from typing import Dict, Any, Optional
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 class HealthStatus(Enum):
     """Health check status."""
+
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
@@ -30,6 +32,7 @@ class HealthStatus(Enum):
 @dataclass
 class ComponentHealth:
     """Health status of a single component."""
+
     name: str
     status: HealthStatus
     latency_ms: Optional[float] = None
@@ -132,7 +135,11 @@ def check_redis_health() -> ComponentHealth:
         logger.error(f"Redis health check failed: {e}")
         return ComponentHealth(
             name="redis",
-            status=HealthStatus.DEGRADED if not settings.redis_enabled else HealthStatus.UNHEALTHY,
+            status=(
+                HealthStatus.DEGRADED
+                if not settings.redis_enabled
+                else HealthStatus.UNHEALTHY
+            ),
             latency_ms=round(latency_ms, 2),
             message=f"Connection failed: {type(e).__name__}",
         )
@@ -158,13 +165,17 @@ def check_weather_provider_health() -> ComponentHealth:
                 message="Providers not initialized",
             )
 
-        copernicus = providers.get('copernicus')
+        copernicus = providers.get("copernicus")
         has_cds = copernicus._has_cdsapi if copernicus else False
         has_cmems = (
-            copernicus._has_copernicusmarine
-            and bool(copernicus.cmems_username)
-            and bool(copernicus.cmems_password)
-        ) if copernicus else False
+            (
+                copernicus._has_copernicusmarine
+                and bool(copernicus.cmems_username)
+                and bool(copernicus.cmems_password)
+            )
+            if copernicus
+            else False
+        )
 
         # In demo mode, weather is served from DB snapshot
         if settings.demo_mode:
@@ -302,6 +313,7 @@ async def get_detailed_status() -> Dict[str, Any]:
 
     # Get uptime
     from api.state import get_app_state
+
     app_state = get_app_state()
 
     return {

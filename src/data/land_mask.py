@@ -22,12 +22,15 @@ _globe = None
 
 try:
     from global_land_mask import globe
+
     _globe = globe
     _HAS_LAND_MASK = True
     logger.info("Using global-land-mask for land detection")
 except ImportError:
-    logger.warning("global-land-mask not installed. Using simplified land detection. "
-                   "For better accuracy: pip install global-land-mask")
+    logger.warning(
+        "global-land-mask not installed. Using simplified land detection. "
+        "For better accuracy: pip install global-land-mask"
+    )
 
 
 # Simplified continental bounding boxes for fallback
@@ -77,23 +80,60 @@ INLAND_WATER = [
 # Points are (lat, lon) forming a polygon
 SIMPLIFIED_COASTLINES = {
     "western_europe": [
-        (36.0, -10.0), (43.0, -10.0), (48.0, -5.0), (51.0, 2.0),
-        (54.0, 8.0), (57.0, 8.0), (58.0, 12.0), (56.0, 12.0),
-        (54.0, 10.0), (53.0, 7.0), (51.0, 4.0), (49.0, 0.0),
-        (46.0, -2.0), (43.0, -2.0), (42.0, 3.0), (41.0, 2.0),
-        (37.0, -6.0), (36.0, -6.0), (36.0, -10.0),
+        (36.0, -10.0),
+        (43.0, -10.0),
+        (48.0, -5.0),
+        (51.0, 2.0),
+        (54.0, 8.0),
+        (57.0, 8.0),
+        (58.0, 12.0),
+        (56.0, 12.0),
+        (54.0, 10.0),
+        (53.0, 7.0),
+        (51.0, 4.0),
+        (49.0, 0.0),
+        (46.0, -2.0),
+        (43.0, -2.0),
+        (42.0, 3.0),
+        (41.0, 2.0),
+        (37.0, -6.0),
+        (36.0, -6.0),
+        (36.0, -10.0),
     ],
     "uk": [
-        (50.0, -6.0), (51.0, -5.0), (52.0, -5.0), (53.5, -5.0),
-        (55.0, -6.0), (58.5, -7.0), (59.0, -3.0), (58.0, -1.5),
-        (55.0, -1.5), (54.0, 0.0), (53.0, 0.5), (52.5, 1.5),
-        (51.0, 1.5), (50.5, 0.0), (50.0, -2.0), (50.0, -6.0),
+        (50.0, -6.0),
+        (51.0, -5.0),
+        (52.0, -5.0),
+        (53.5, -5.0),
+        (55.0, -6.0),
+        (58.5, -7.0),
+        (59.0, -3.0),
+        (58.0, -1.5),
+        (55.0, -1.5),
+        (54.0, 0.0),
+        (53.0, 0.5),
+        (52.5, 1.5),
+        (51.0, 1.5),
+        (50.5, 0.0),
+        (50.0, -2.0),
+        (50.0, -6.0),
     ],
     "us_east_coast": [
-        (25.0, -80.0), (30.0, -81.0), (32.0, -81.0), (35.0, -76.0),
-        (37.0, -76.0), (39.0, -75.0), (40.0, -74.0), (41.0, -72.0),
-        (42.0, -71.0), (43.0, -70.0), (45.0, -67.0), (47.0, -68.0),
-        (45.0, -66.0), (44.0, -66.0), (43.0, -65.0),
+        (25.0, -80.0),
+        (30.0, -81.0),
+        (32.0, -81.0),
+        (35.0, -76.0),
+        (37.0, -76.0),
+        (39.0, -75.0),
+        (40.0, -74.0),
+        (41.0, -72.0),
+        (42.0, -71.0),
+        (43.0, -70.0),
+        (45.0, -67.0),
+        (47.0, -68.0),
+        (45.0, -66.0),
+        (44.0, -66.0),
+        (43.0, -65.0),
     ],
 }
 
@@ -174,8 +214,10 @@ def _is_coastal_water(lat: float, lon: float) -> bool:
 
 
 def is_path_clear(
-    lat1: float, lon1: float,
-    lat2: float, lon2: float,
+    lat1: float,
+    lon1: float,
+    lat2: float,
+    lon2: float,
     num_checks: int = 0,
 ) -> bool:
     """
@@ -217,8 +259,12 @@ def get_land_mask_status() -> dict:
     """Get information about land mask availability."""
     return {
         "high_resolution_available": _HAS_LAND_MASK,
-        "method": "global-land-mask (1km)" if _HAS_LAND_MASK else "simplified bounding boxes",
-        "cache_size": is_ocean.cache_info().currsize if hasattr(is_ocean, 'cache_info') else 0,
+        "method": (
+            "global-land-mask (1km)" if _HAS_LAND_MASK else "simplified bounding boxes"
+        ),
+        "cache_size": (
+            is_ocean.cache_info().currsize if hasattr(is_ocean, "cache_info") else 0
+        ),
     }
 
 
@@ -242,15 +288,19 @@ def _self_test():
     for lat, lon, expected, desc in test_cases:
         actual = is_ocean(lat, lon)
         passed = actual == expected
-        results.append({
-            "point": (lat, lon),
-            "description": desc,
-            "expected": expected,
-            "actual": actual,
-            "passed": passed,
-        })
+        results.append(
+            {
+                "point": (lat, lon),
+                "description": desc,
+                "expected": expected,
+                "actual": actual,
+                "passed": passed,
+            }
+        )
         if not passed:
-            logger.warning(f"Land mask test failed: {desc} ({lat}, {lon}) - "
-                          f"expected {expected}, got {actual}")
+            logger.warning(
+                f"Land mask test failed: {desc} ({lat}, {lon}) - "
+                f"expected {expected}, got {actual}"
+            )
 
     return results

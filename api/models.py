@@ -1,8 +1,17 @@
 """
 SQLAlchemy models for WINDMAR database.
 """
+
 from sqlalchemy import (
-    Column, String, Float, Integer, Boolean, DateTime, ForeignKey, Text, JSON
+    Column,
+    String,
+    Float,
+    Integer,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Text,
+    JSON,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -53,7 +62,9 @@ class VesselSpec(Base):
     engine_power = Column(Float, nullable=True)
     fuel_type = Column(String(50), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
     created_by = Column(UUID(as_uuid=True), nullable=True)
     extra_metadata = Column("metadata", JSON, nullable=True)
 
@@ -72,7 +83,9 @@ class Route(Base):
     __tablename__ = "routes"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    vessel_id = Column(UUID(as_uuid=True), ForeignKey("vessel_specs.id"), nullable=True, index=True)
+    vessel_id = Column(
+        UUID(as_uuid=True), ForeignKey("vessel_specs.id"), nullable=True, index=True
+    )
     origin_lat = Column(Float, nullable=False)
     origin_lon = Column(Float, nullable=False)
     destination_lat = Column(Float, nullable=False)
@@ -102,7 +115,9 @@ class CalibrationData(Base):
     __tablename__ = "calibration_data"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    vessel_id = Column(UUID(as_uuid=True), ForeignKey("vessel_specs.id"), nullable=True, index=True)
+    vessel_id = Column(
+        UUID(as_uuid=True), ForeignKey("vessel_specs.id"), nullable=True, index=True
+    )
     speed = Column(Float, nullable=False)
     fuel_consumption = Column(Float, nullable=False)
     wind_speed = Column(Float, nullable=True)
@@ -128,8 +143,12 @@ class NoonReport(Base):
     __tablename__ = "noon_reports"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    vessel_id = Column(UUID(as_uuid=True), ForeignKey("vessel_specs.id"), nullable=True, index=True)
-    route_id = Column(UUID(as_uuid=True), ForeignKey("routes.id"), nullable=True, index=True)
+    vessel_id = Column(
+        UUID(as_uuid=True), ForeignKey("vessel_specs.id"), nullable=True, index=True
+    )
+    route_id = Column(
+        UUID(as_uuid=True), ForeignKey("routes.id"), nullable=True, index=True
+    )
     position_lat = Column(Float, nullable=False)
     position_lon = Column(Float, nullable=False)
     speed_over_ground = Column(Float, nullable=True)

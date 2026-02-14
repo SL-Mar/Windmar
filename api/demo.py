@@ -11,12 +11,13 @@ from api.config import settings
 
 def require_not_demo(feature_name: str = "This feature"):
     """FastAPI Depends() guard that raises 403 in demo mode."""
+
     def _guard():
         if settings.demo_mode:
             raise HTTPException(
-                status_code=403,
-                detail=f"{feature_name} is disabled in demo mode."
+                status_code=403, detail=f"{feature_name} is disabled in demo mode."
             )
+
     return _guard
 
 
@@ -25,7 +26,7 @@ def demo_mode_response(feature_name: str = "This feature"):
     return {
         "status": "demo",
         "message": f"{feature_name} is disabled in demo mode. "
-                   "Pre-loaded weather data is served from the database snapshot.",
+        "Pre-loaded weather data is served from the database snapshot.",
     }
 
 

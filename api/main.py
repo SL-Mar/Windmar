@@ -24,11 +24,22 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+
 try:
     import redis as redis_lib
 except ImportError:
     redis_lib = None
-from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile, File, Query, Response, Depends, Request
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    HTTPException,
+    UploadFile,
+    File,
+    Query,
+    Response,
+    Depends,
+    Request,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -43,6 +54,7 @@ MAX_CSV_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB for CSV files
 
 # Import WINDMAR modules
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.optimization.vessel_model import VesselModel, VesselSpecs
@@ -51,17 +63,31 @@ from src.optimization.base_optimizer import OptimizedRoute
 from src.optimization.route_optimizer import RouteOptimizer
 from src.optimization.visir_optimizer import VisirOptimizer
 from src.optimization.grid_weather_provider import GridWeatherProvider
-from src.optimization.temporal_weather_provider import TemporalGridWeatherProvider, WeatherProvenance
+from src.optimization.temporal_weather_provider import (
+    TemporalGridWeatherProvider,
+    WeatherProvenance,
+)
 from src.optimization.weather_assessment import RouteWeatherAssessment
-from src.optimization.monte_carlo import MonteCarloSimulator, MonteCarloResult as MCResult
+from src.optimization.monte_carlo import (
+    MonteCarloSimulator,
+    MonteCarloResult as MCResult,
+)
 from src.optimization.vessel_calibration import (
-    VesselCalibrator, NoonReport, CalibrationFactors, create_calibrated_model
+    VesselCalibrator,
+    NoonReport,
+    CalibrationFactors,
+    create_calibrated_model,
 )
 from src.routes.rtz_parser import (
-    Route, Waypoint, parse_rtz_string, create_route_from_waypoints,
-    haversine_distance, calculate_bearing
+    Route,
+    Waypoint,
+    parse_rtz_string,
+    create_route_from_waypoints,
+    haversine_distance,
+    calculate_bearing,
 )
 from src.data.land_mask import is_ocean
+
 
 # Vectorized ocean mask using global-land-mask's numpy support
 def _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05):
@@ -71,6 +97,7 @@ def _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05):
     lon_grid, lat_grid = np.meshgrid(mask_lons, mask_lats)
     try:
         from global_land_mask import globe
+
         mask = globe.is_ocean(lat_grid, lon_grid)
         return mask_lats.tolist(), mask_lons.tolist(), mask.tolist()
     except ImportError:
@@ -80,10 +107,18 @@ def _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05):
             for lat in mask_lats
         ]
         return mask_lats.tolist(), mask_lons.tolist(), mask
+
+
 from src.data.copernicus import (
-    CopernicusDataProvider, SyntheticDataProvider, GFSDataProvider, WeatherData,
-    ClimatologyProvider, UnifiedWeatherProvider, WeatherDataSource
+    CopernicusDataProvider,
+    SyntheticDataProvider,
+    GFSDataProvider,
+    WeatherData,
+    ClimatologyProvider,
+    UnifiedWeatherProvider,
+    WeatherDataSource,
 )
+
 try:
     from src.data.db_weather_provider import DbWeatherProvider
     from src.data.weather_ingestion import WeatherIngestionService
@@ -92,10 +127,13 @@ except ImportError:
     WeatherIngestionService = None
 
 
-def _apply_ocean_mask_velocity(u: np.ndarray, v: np.ndarray, lats: np.ndarray, lons: np.ndarray) -> tuple:
+def _apply_ocean_mask_velocity(
+    u: np.ndarray, v: np.ndarray, lats: np.ndarray, lons: np.ndarray
+) -> tuple:
     """Zero out U/V components over land so leaflet-velocity skips land areas."""
     try:
         from global_land_mask import globe
+
         lon_grid, lat_grid = np.meshgrid(lons, lats)
         ocean = globe.is_ocean(lat_grid, lon_grid)
         u_masked = np.where(ocean, u, 0.0)
@@ -103,12 +141,23 @@ def _apply_ocean_mask_velocity(u: np.ndarray, v: np.ndarray, lats: np.ndarray, l
         return u_masked, v_masked
     except ImportError:
         return u, v
+
+
 from src.compliance.cii import (
-    CIICalculator, VesselType as CIIVesselType, CIIRating, CIIResult,
-    CIIProjection, estimate_cii_from_route, annualize_voyage_cii
+    CIICalculator,
+    VesselType as CIIVesselType,
+    CIIRating,
+    CIIResult,
+    CIIProjection,
+    estimate_cii_from_route,
+    annualize_voyage_cii,
 )
 from src.data.regulatory_zones import (
-    get_zone_checker, Zone, ZoneProperties, ZoneType, ZoneInteraction
+    get_zone_checker,
+    Zone,
+    ZoneProperties,
+    ZoneType,
+    ZoneInteraction,
 )
 from api.config import settings
 from api.demo import require_not_demo, demo_mode_response, is_demo
@@ -127,7 +176,7 @@ from api.resilience import get_all_circuit_breaker_status
 # Configure structured logging for production
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
-    format='%(message)s',  # JSON logs are self-contained
+    format="%(message)s",  # JSON logs are self-contained
 )
 logger = logging.getLogger(__name__)
 
@@ -135,6 +184,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # Application Factory
 # =============================================================================
+
 
 def create_app() -> FastAPI:
     """
@@ -214,9 +264,9 @@ Contact: support@windmar.io
             content={
                 "error": "Rate limit exceeded",
                 "detail": str(exc.detail),
-                "retry_after": getattr(exc, 'retry_after', 60),
+                "retry_after": getattr(exc, "retry_after", 60),
             },
-            headers={"Retry-After": str(getattr(exc, 'retry_after', 60))},
+            headers={"Retry-After": str(getattr(exc, "retry_after", 60))},
         )
 
     return application
@@ -225,6 +275,7 @@ Contact: support@windmar.io
 # =============================================================================
 # Database Migration Runner
 # =============================================================================
+
 
 def _run_weather_migrations():
     """Apply weather table migrations if they don't exist yet."""
@@ -261,7 +312,12 @@ def _run_weather_migrations():
                 return
 
             # Apply migration
-            migration_path = Path(__file__).parent.parent / "docker" / "migrations" / "001_weather_tables.sql"
+            migration_path = (
+                Path(__file__).parent.parent
+                / "docker"
+                / "migrations"
+                / "001_weather_tables.sql"
+            )
             if migration_path.exists():
                 sql = migration_path.read_text()
                 cur.execute(sql)
@@ -281,9 +337,12 @@ app = create_app()
 # Include live sensor API router
 try:
     from api.live import include_in_app as include_live_routes
+
     include_live_routes(app)
 except ImportError:
-    logging.getLogger(__name__).info("Live sensor module not available, skipping live routes")
+    logging.getLogger(__name__).info(
+        "Live sensor module not available, skipping live routes"
+    )
 
 # Initialize application state (thread-safe singleton)
 _ = get_app_state()
@@ -292,7 +351,9 @@ _ = get_app_state()
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     body = await request.body()
-    logging.error(f"Validation error on {request.method} {request.url.path}: {exc.errors()}")
+    logging.error(
+        f"Validation error on {request.method} {request.url.path}: {exc.errors()}"
+    )
     logging.error(f"Request body: {body[:500]}")
     return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
@@ -300,6 +361,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # ============================================================================
 # Pydantic Models
 # ============================================================================
+
 
 class Position(BaseModel):
     lat: float = Field(..., ge=-90, le=90)
@@ -320,8 +382,11 @@ class RouteModel(BaseModel):
 
 class VoyageRequest(BaseModel):
     """Request for voyage calculation."""
+
     waypoints: List[Position]
-    calm_speed_kts: float = Field(..., gt=0, lt=30, description="Calm water speed in knots")
+    calm_speed_kts: float = Field(
+        ..., gt=0, lt=30, description="Calm water speed in knots"
+    )
     is_laden: bool = True
     departure_time: Optional[datetime] = None
     use_weather: bool = True
@@ -329,16 +394,28 @@ class VoyageRequest(BaseModel):
 
 class OptimizationRequest(BaseModel):
     """Request for route optimization."""
+
     origin: Position
     destination: Position
-    calm_speed_kts: float = Field(..., gt=0, lt=30, description="Calm water speed in knots")
+    calm_speed_kts: float = Field(
+        ..., gt=0, lt=30, description="Calm water speed in knots"
+    )
     is_laden: bool = True
     departure_time: Optional[datetime] = None
     optimization_target: str = Field("fuel", description="Minimize 'fuel' or 'time'")
-    grid_resolution_deg: float = Field(0.2, ge=0.05, le=2.0, description="Grid resolution in degrees")
-    max_time_factor: float = Field(1.15, ge=1.0, le=2.0,
-        description="Max voyage time as multiple of direct time (1.15 = 15% longer allowed)")
-    engine: str = Field("astar", description="Optimization engine: 'astar' (A* pathfinding) or 'visir' (VISIR graph-based Dijkstra)")
+    grid_resolution_deg: float = Field(
+        0.2, ge=0.05, le=2.0, description="Grid resolution in degrees"
+    )
+    max_time_factor: float = Field(
+        1.15,
+        ge=1.0,
+        le=2.0,
+        description="Max voyage time as multiple of direct time (1.15 = 15% longer allowed)",
+    )
+    engine: str = Field(
+        "astar",
+        description="Optimization engine: 'astar' (A* pathfinding) or 'visir' (VISIR graph-based Dijkstra)",
+    )
     # All user waypoints for multi-segment optimization (respects intermediate via-points)
     route_waypoints: Optional[List[Position]] = None
     # Baseline from voyage calculation (enables dual-strategy comparison)
@@ -346,11 +423,17 @@ class OptimizationRequest(BaseModel):
     baseline_time_hours: Optional[float] = None
     baseline_distance_nm: Optional[float] = None
     # Safety weight: 0.0 = pure fuel optimization, 1.0 = full safety penalties
-    safety_weight: float = Field(0.0, ge=0.0, le=1.0, description="Safety penalty weight: 0=fuel optimal, 1=safety priority")
+    safety_weight: float = Field(
+        0.0,
+        ge=0.0,
+        le=1.0,
+        description="Safety penalty weight: 0=fuel optimal, 1=safety priority",
+    )
 
 
 class WeatherProvenanceModel(BaseModel):
     """Weather data source provenance metadata."""
+
     source_type: str  # "forecast", "hindcast", "climatology", "blended"
     model_name: str  # "GFS", "CMEMS_wave", etc.
     forecast_lead_hours: float
@@ -359,6 +442,7 @@ class WeatherProvenanceModel(BaseModel):
 
 class OptimizationLegModel(BaseModel):
     """Optimized route leg details."""
+
     from_lat: float
     from_lon: float
     to_lat: float
@@ -388,6 +472,7 @@ class OptimizationLegModel(BaseModel):
 
 class SafetySummary(BaseModel):
     """Safety assessment summary for optimized route."""
+
     status: str  # "safe", "marginal", "dangerous"
     warnings: List[str]
     max_roll_deg: float
@@ -397,6 +482,7 @@ class SafetySummary(BaseModel):
 
 class SpeedScenarioModel(BaseModel):
     """One speed strategy applied to the optimized path."""
+
     strategy: str
     label: str
     total_fuel_mt: float
@@ -411,6 +497,7 @@ class SpeedScenarioModel(BaseModel):
 
 class OptimizationResponse(BaseModel):
     """Route optimization result."""
+
     waypoints: List[Position]
     total_fuel_mt: float
     total_time_hours: float
@@ -455,6 +542,7 @@ class OptimizationResponse(BaseModel):
 
 class LegResultModel(BaseModel):
     """Result for a single leg."""
+
     leg_index: int
     from_wp: WaypointModel
     to_wp: WaypointModel
@@ -491,6 +579,7 @@ class LegResultModel(BaseModel):
 
 class DataSourceSummary(BaseModel):
     """Summary of data sources used in voyage calculation."""
+
     forecast_legs: int
     blended_legs: int
     climatology_legs: int
@@ -500,6 +589,7 @@ class DataSourceSummary(BaseModel):
 
 class VoyageResponse(BaseModel):
     """Complete voyage calculation response."""
+
     route_name: str
     departure_time: datetime
     arrival_time: datetime
@@ -521,6 +611,7 @@ class VoyageResponse(BaseModel):
 
 class MonteCarloRequest(BaseModel):
     """Request for Monte Carlo voyage simulation."""
+
     waypoints: List[Position]
     calm_speed_kts: float = Field(..., gt=0, lt=30)
     is_laden: bool = True
@@ -542,6 +633,7 @@ class PercentileString(BaseModel):
 
 class MonteCarloResponse(BaseModel):
     """Monte Carlo simulation result."""
+
     n_simulations: int
     eta: PercentileString
     fuel_mt: PercentileFloat
@@ -551,6 +643,7 @@ class MonteCarloResponse(BaseModel):
 
 class WindDataPoint(BaseModel):
     """Wind data at a point."""
+
     lat: float
     lon: float
     u: float  # U component (m/s)
@@ -561,6 +654,7 @@ class WindDataPoint(BaseModel):
 
 class WeatherGridResponse(BaseModel):
     """Weather grid data for visualization."""
+
     parameter: str
     time: datetime
     bbox: Dict[str, float]
@@ -574,6 +668,7 @@ class WeatherGridResponse(BaseModel):
 
 class VelocityDataResponse(BaseModel):
     """Wind velocity data in leaflet-velocity format."""
+
     header: Dict
     data_u: List[float]
     data_v: List[float]
@@ -581,6 +676,7 @@ class VelocityDataResponse(BaseModel):
 
 class VesselConfig(BaseModel):
     """Vessel configuration."""
+
     dwt: float = 49000.0
     loa: float = 183.0
     beam: float = 32.0
@@ -594,6 +690,7 @@ class VesselConfig(BaseModel):
 
 class NoonReportModel(BaseModel):
     """Noon report data for calibration."""
+
     timestamp: datetime
     latitude: float = Field(..., ge=-90, le=90)
     longitude: float = Field(..., ge=-180, le=180)
@@ -612,6 +709,7 @@ class NoonReportModel(BaseModel):
 
 class CalibrationFactorsModel(BaseModel):
     """Calibration factors for vessel model."""
+
     calm_water: float = Field(1.0, description="Hull fouling factor")
     wind: float = Field(1.0, description="Wind coefficient adjustment")
     waves: float = Field(1.0, description="Wave response adjustment")
@@ -624,6 +722,7 @@ class CalibrationFactorsModel(BaseModel):
 
 class CalibrationResponse(BaseModel):
     """Calibration result response."""
+
     factors: CalibrationFactorsModel
     reports_used: int
     reports_skipped: int
@@ -683,6 +782,7 @@ gfs_provider = GFSDataProvider(cache_dir="data/gfs_cache")
 CACHE_TTL_MINUTES = 60
 _redis_client = None  # Optional[redis.Redis]
 
+
 def _get_redis():
     """Lazy-init Redis client. Returns None if unavailable."""
     global _redis_client
@@ -700,9 +800,11 @@ def _get_redis():
         logger.warning(f"Redis unavailable, falling back to in-memory cache: {e}")
         return None
 
+
 # Fallback in-memory cache (used only when Redis is down)
 _weather_cache: Dict[str, WeatherData] = {}
 _cache_expiry: Dict[str, datetime] = {}
+
 
 def _redis_cache_get(key: str) -> Optional[WeatherData]:
     """Get from Redis, falling back to in-memory."""
@@ -715,9 +817,14 @@ def _redis_cache_get(key: str) -> Optional[WeatherData]:
         except Exception:
             pass
     # Fallback to in-memory
-    if key in _weather_cache and key in _cache_expiry and datetime.utcnow() < _cache_expiry[key]:
+    if (
+        key in _weather_cache
+        and key in _cache_expiry
+        and datetime.utcnow() < _cache_expiry[key]
+    ):
         return _weather_cache[key]
     return None
+
 
 def _redis_cache_put(key: str, data: WeatherData, ttl_seconds: int = 900):
     """Put to Redis, falling back to in-memory."""
@@ -732,6 +839,7 @@ def _redis_cache_put(key: str, data: WeatherData, ttl_seconds: int = 900):
     _weather_cache[key] = data
     _cache_expiry[key] = datetime.utcnow() + timedelta(seconds=ttl_seconds)
 
+
 # =============================================================================
 # Database Weather Provider
 # =============================================================================
@@ -741,22 +849,29 @@ weather_ingestion = None
 
 if _db_url.startswith("postgresql") and DbWeatherProvider is not None:
     db_weather = DbWeatherProvider(_db_url)
-    weather_ingestion = WeatherIngestionService(_db_url, copernicus_provider, gfs_provider)
+    weather_ingestion = WeatherIngestionService(
+        _db_url, copernicus_provider, gfs_provider
+    )
 
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
 
-def _get_cache_key(data_type: str, lat_min: float, lat_max: float, lon_min: float, lon_max: float) -> str:
+
+def _get_cache_key(
+    data_type: str, lat_min: float, lat_max: float, lon_min: float, lon_max: float
+) -> str:
     """Generate cache key for weather data."""
     return f"{data_type}_{lat_min:.1f}_{lat_max:.1f}_{lon_min:.1f}_{lon_max:.1f}"
 
 
 def _supplement_temporal_wind(
     temporal_wx,
-    lat_min: float, lat_max: float,
-    lon_min: float, lon_max: float,
+    lat_min: float,
+    lat_max: float,
+    lon_min: float,
+    lon_max: float,
     departure: datetime,
 ) -> bool:
     """Inject GFS wind snapshot into a temporal provider that lacks wind grids.
@@ -768,13 +883,16 @@ def _supplement_temporal_wind(
     Returns True if wind was successfully injected.
     """
     import time as _time
+
     t0 = _time.monotonic()
     try:
         wind_data = gfs_provider.fetch_wind_data(
             lat_min, lat_max, lon_min, lon_max, departure, forecast_hour=0
         )
         if wind_data is None or wind_data.u_component is None:
-            logger.warning("GFS wind supplement: fetch returned None — wind resistance unavailable")
+            logger.warning(
+                "GFS wind supplement: fetch returned None — wind resistance unavailable"
+            )
             return False
 
         # Convert WeatherData to GridDict format: {forecast_hour: (lats_1d, lons_1d, data_2d)}
@@ -795,10 +913,12 @@ def _supplement_temporal_wind(
 
 
 def get_wind_field(
-    lat_min: float, lat_max: float,
-    lon_min: float, lon_max: float,
+    lat_min: float,
+    lat_max: float,
+    lon_min: float,
+    lon_max: float,
     resolution: float = 1.0,
-    time: datetime = None
+    time: datetime = None,
 ) -> WeatherData:
     """
     Get wind field data.
@@ -818,7 +938,9 @@ def get_wind_field(
 
     # Try DB first (pre-ingested grids — sub-second)
     if db_weather is not None:
-        wind_data = db_weather.get_wind_from_db(lat_min, lat_max, lon_min, lon_max, time)
+        wind_data = db_weather.get_wind_from_db(
+            lat_min, lat_max, lon_min, lon_max, time
+        )
         if wind_data is not None:
             logger.info("Using DB pre-ingested wind data")
             _redis_cache_put(cache_key, wind_data, CACHE_TTL_MINUTES * 60)
@@ -830,7 +952,9 @@ def get_wind_field(
         logger.info("Using GFS near-real-time wind data")
     else:
         # Fall back to ERA5 (reanalysis, ~5-day lag)
-        wind_data = copernicus_provider.fetch_wind_data(lat_min, lat_max, lon_min, lon_max, time)
+        wind_data = copernicus_provider.fetch_wind_data(
+            lat_min, lat_max, lon_min, lon_max, time
+        )
         if wind_data is not None:
             logger.info("GFS unavailable, using ERA5 reanalysis wind data")
         else:
@@ -845,8 +969,10 @@ def get_wind_field(
 
 
 def get_wave_field(
-    lat_min: float, lat_max: float,
-    lon_min: float, lon_max: float,
+    lat_min: float,
+    lat_max: float,
+    lon_min: float,
+    lon_max: float,
     resolution: float = 1.0,
     wind_data: WeatherData = None,
 ) -> WeatherData:
@@ -884,8 +1010,10 @@ def get_wave_field(
 
 
 def get_current_field(
-    lat_min: float, lat_max: float,
-    lon_min: float, lon_max: float,
+    lat_min: float,
+    lat_max: float,
+    lon_min: float,
+    lon_max: float,
     resolution: float = 1.0,
 ) -> WeatherData:
     """
@@ -901,14 +1029,18 @@ def get_current_field(
 
     # Try DB first
     if db_weather is not None:
-        current_data = db_weather.get_current_from_db(lat_min, lat_max, lon_min, lon_max)
+        current_data = db_weather.get_current_from_db(
+            lat_min, lat_max, lon_min, lon_max
+        )
         if current_data is not None:
             logger.info("Using DB pre-ingested current data")
             _redis_cache_put(cache_key, current_data, CACHE_TTL_MINUTES * 60)
             return current_data
 
     # Try CMEMS live
-    current_data = copernicus_provider.fetch_current_data(lat_min, lat_max, lon_min, lon_max)
+    current_data = copernicus_provider.fetch_current_data(
+        lat_min, lat_max, lon_min, lon_max
+    )
 
     if current_data is None:
         logger.info("CMEMS current data unavailable, using synthetic data")
@@ -921,8 +1053,10 @@ def get_current_field(
 
 
 def get_sst_field(
-    lat_min: float, lat_max: float,
-    lon_min: float, lon_max: float,
+    lat_min: float,
+    lat_max: float,
+    lon_min: float,
+    lon_max: float,
     resolution: float = 1.0,
     time: datetime = None,
 ) -> WeatherData:
@@ -939,7 +1073,9 @@ def get_sst_field(
     if cached is not None:
         return cached
 
-    sst_data = copernicus_provider.fetch_sst_data(lat_min, lat_max, lon_min, lon_max, time)
+    sst_data = copernicus_provider.fetch_sst_data(
+        lat_min, lat_max, lon_min, lon_max, time
+    )
     if sst_data is None:
         logger.info("CMEMS SST unavailable, using synthetic data")
         sst_data = synthetic_provider.generate_sst_field(
@@ -951,8 +1087,10 @@ def get_sst_field(
 
 
 def get_visibility_field(
-    lat_min: float, lat_max: float,
-    lon_min: float, lon_max: float,
+    lat_min: float,
+    lat_max: float,
+    lon_min: float,
+    lon_max: float,
     resolution: float = 1.0,
     time: datetime = None,
 ) -> WeatherData:
@@ -969,7 +1107,9 @@ def get_visibility_field(
     if cached is not None:
         return cached
 
-    vis_data = gfs_provider.fetch_visibility_data(lat_min, lat_max, lon_min, lon_max, time)
+    vis_data = gfs_provider.fetch_visibility_data(
+        lat_min, lat_max, lon_min, lon_max, time
+    )
     if vis_data is None:
         logger.info("GFS visibility unavailable, using synthetic data")
         vis_data = synthetic_provider.generate_visibility_field(
@@ -981,8 +1121,10 @@ def get_visibility_field(
 
 
 def get_ice_field(
-    lat_min: float, lat_max: float,
-    lon_min: float, lon_max: float,
+    lat_min: float,
+    lat_max: float,
+    lon_min: float,
+    lon_max: float,
     resolution: float = 1.0,
     time: datetime = None,
 ) -> WeatherData:
@@ -1007,7 +1149,9 @@ def get_ice_field(
             _redis_cache_put(cache_key, ice_data, CACHE_TTL_MINUTES * 60)
             return ice_data
 
-    ice_data = copernicus_provider.fetch_ice_data(lat_min, lat_max, lon_min, lon_max, time)
+    ice_data = copernicus_provider.fetch_ice_data(
+        lat_min, lat_max, lon_min, lon_max, time
+    )
     if ice_data is None:
         logger.info("CMEMS ice data unavailable, using synthetic data")
         ice_data = synthetic_provider.generate_ice_field(
@@ -1018,7 +1162,9 @@ def get_ice_field(
     return ice_data
 
 
-def get_weather_at_point(lat: float, lon: float, time: datetime) -> Tuple[Dict, Optional[WeatherDataSource]]:
+def get_weather_at_point(
+    lat: float, lon: float, time: datetime
+) -> Tuple[Dict, Optional[WeatherDataSource]]:
     """
     Get weather at a specific point.
 
@@ -1033,13 +1179,13 @@ def get_weather_at_point(lat: float, lon: float, time: datetime) -> Tuple[Dict, 
         point_wx, source = unified_weather_provider.get_weather_at_point(lat, lon, time)
 
         return {
-            'wind_speed_ms': point_wx.wind_speed_ms,
-            'wind_dir_deg': point_wx.wind_dir_deg,
-            'sig_wave_height_m': point_wx.wave_height_m,
-            'wave_period_s': point_wx.wave_period_s,
-            'wave_dir_deg': point_wx.wave_dir_deg,
-            'current_speed_ms': point_wx.current_speed_ms,
-            'current_dir_deg': point_wx.current_dir_deg,
+            "wind_speed_ms": point_wx.wind_speed_ms,
+            "wind_dir_deg": point_wx.wind_dir_deg,
+            "sig_wave_height_m": point_wx.wave_height_m,
+            "wave_period_s": point_wx.wave_period_s,
+            "wave_dir_deg": point_wx.wave_dir_deg,
+            "current_speed_ms": point_wx.current_speed_ms,
+            "current_dir_deg": point_wx.current_dir_deg,
         }, source
 
     except Exception as e:
@@ -1059,13 +1205,13 @@ def get_weather_at_point(lat: float, lon: float, time: datetime) -> Tuple[Dict, 
         )
 
         return {
-            'wind_speed_ms': point_wx.wind_speed_ms,
-            'wind_dir_deg': point_wx.wind_dir_deg,
-            'sig_wave_height_m': point_wx.wave_height_m,
-            'wave_period_s': point_wx.wave_period_s,
-            'wave_dir_deg': point_wx.wave_dir_deg,
-            'current_speed_ms': point_wx.current_speed_ms,
-            'current_dir_deg': point_wx.current_dir_deg,
+            "wind_speed_ms": point_wx.wind_speed_ms,
+            "wind_dir_deg": point_wx.wind_dir_deg,
+            "sig_wave_height_m": point_wx.wave_height_m,
+            "wave_period_s": point_wx.wave_period_s,
+            "wave_dir_deg": point_wx.wave_dir_deg,
+            "current_speed_ms": point_wx.current_speed_ms,
+            "current_dir_deg": point_wx.current_dir_deg,
         }, None
 
 
@@ -1075,33 +1221,34 @@ _voyage_data_sources: List[Dict] = []
 
 def weather_provider(lat: float, lon: float, time: datetime) -> LegWeather:
     """Weather provider function for voyage calculator."""
-    global _voyage_data_sources
-
     wx, source = get_weather_at_point(lat, lon, time)
 
     # Track data source for this leg
     if source:
-        _voyage_data_sources.append({
-            'lat': lat,
-            'lon': lon,
-            'time': time.isoformat(),
-            'source': source.source,
-            'forecast_weight': source.forecast_weight,
-            'message': source.message,
-        })
+        _voyage_data_sources.append(
+            {
+                "lat": lat,
+                "lon": lon,
+                "time": time.isoformat(),
+                "source": source.source,
+                "forecast_weight": source.forecast_weight,
+                "message": source.message,
+            }
+        )
 
     return LegWeather(
-        wind_speed_ms=wx['wind_speed_ms'],
-        wind_dir_deg=wx['wind_dir_deg'],
-        sig_wave_height_m=wx['sig_wave_height_m'],
-        wave_period_s=wx.get('wave_period_s', 5.0 + wx['sig_wave_height_m']),
-        wave_dir_deg=wx['wave_dir_deg'],
+        wind_speed_ms=wx["wind_speed_ms"],
+        wind_dir_deg=wx["wind_dir_deg"],
+        sig_wave_height_m=wx["sig_wave_height_m"],
+        wave_period_s=wx.get("wave_period_s", 5.0 + wx["sig_wave_height_m"]),
+        wave_dir_deg=wx["wave_dir_deg"],
     )
 
 
 # ============================================================================
 # API Endpoints - Core
 # ============================================================================
+
 
 @app.get("/", tags=["System"])
 async def root():
@@ -1124,7 +1271,7 @@ async def root():
             "voyage": "/api/voyage/...",
             "vessel": "/api/vessel/...",
             "zones": "/api/zones/...",
-        }
+        },
     }
 
 
@@ -1134,8 +1281,10 @@ async def root():
 _log_buffer: collections.deque = collections.deque(maxlen=200)
 _log_event = asyncio.Event()
 
+
 class _BufferHandler(logging.Handler):
     """Captures log records into a ring buffer for SSE streaming."""
+
     def emit(self, record):
         try:
             entry = {
@@ -1152,6 +1301,7 @@ class _BufferHandler(logging.Handler):
         except Exception:
             pass
 
+
 _buf_handler = _BufferHandler()
 _buf_handler.setLevel(logging.INFO)
 _buf_handler.setFormatter(logging.Formatter("%(message)s"))
@@ -1162,6 +1312,7 @@ logging.getLogger("uvicorn.access").addHandler(_buf_handler)
 @app.get("/api/logs/stream", tags=["System"])
 async def log_stream():
     """SSE endpoint streaming backend log entries to the frontend console."""
+
     async def _generate():
         last_idx = len(_log_buffer)
         # Send recent history first
@@ -1204,6 +1355,7 @@ async def health_check():
         - components: Individual component health status
     """
     from api.health import perform_full_health_check
+
     result = await perform_full_health_check()
     result["request_id"] = get_request_id()
     return result
@@ -1218,6 +1370,7 @@ async def liveness_check():
     Use this for K8s livenessProbe configuration.
     """
     from api.health import perform_liveness_check
+
     return await perform_liveness_check()
 
 
@@ -1230,6 +1383,7 @@ async def readiness_check():
     Use this for K8s readinessProbe configuration.
     """
     from api.health import perform_readiness_check
+
     result = await perform_readiness_check()
 
     # Return 503 if not ready
@@ -1251,6 +1405,7 @@ async def detailed_status():
     - Configuration summary
     """
     from api.health import get_detailed_status
+
     return await get_detailed_status()
 
 
@@ -1289,6 +1444,7 @@ async def get_data_sources():
     # Check if pygrib is available for GFS
     try:
         import pygrib
+
         has_pygrib = True
     except ImportError:
         has_pygrib = False
@@ -1325,9 +1481,14 @@ async def get_data_sources():
             }
         },
         "wind_provider_chain": "GFS → ERA5 → Synthetic",
-        "active_wind_source": "gfs" if has_pygrib else (
-            "era5" if (copernicus_provider._has_cdsapi and settings.has_cds_credentials)
-            else "synthetic"
+        "active_wind_source": (
+            "gfs"
+            if has_pygrib
+            else (
+                "era5"
+                if (copernicus_provider._has_cdsapi and settings.has_cds_credentials)
+                else "synthetic"
+            )
         ),
     }
 
@@ -1360,7 +1521,9 @@ async def api_ensure_all_weather(req: EnsureAllRequest):
     import time as _time
 
     if db_weather is None or weather_ingestion is None:
-        raise HTTPException(status_code=503, detail="Database weather provider not configured")
+        raise HTTPException(
+            status_code=503, detail="Database weather provider not configured"
+        )
 
     t0 = _time.monotonic()
     sources = {
@@ -1417,14 +1580,18 @@ async def api_get_wind_field(
     if db_only:
         if db_weather is None:
             return Response(status_code=204)
-        wind_data = db_weather.get_wind_from_db(lat_min, lat_max, lon_min, lon_max, time)
+        wind_data = db_weather.get_wind_from_db(
+            lat_min, lat_max, lon_min, lon_max, time
+        )
         if wind_data is None:
             return Response(status_code=204)
     else:
         wind_data = get_wind_field(lat_min, lat_max, lon_min, lon_max, resolution, time)
 
     # High-resolution ocean mask (0.05° ≈ 5.5km) via vectorized numpy
-    mask_lats, mask_lons, ocean_mask = _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05)
+    mask_lats, mask_lons, ocean_mask = _build_ocean_mask(
+        lat_min, lat_max, lon_min, lon_max, step=0.05
+    )
 
     # SPEC-P1: Piggyback SST on wind endpoint (same bounding box)
     sst_data = get_sst_field(lat_min, lat_max, lon_min, lon_max, resolution, time)
@@ -1443,15 +1610,22 @@ async def api_get_wind_field(
         "ny": len(wind_data.lats),
         "lats": wind_data.lats.tolist(),
         "lons": wind_data.lons.tolist(),
-        "u": wind_data.u_component.tolist() if wind_data.u_component is not None else [],
-        "v": wind_data.v_component.tolist() if wind_data.v_component is not None else [],
+        "u": (
+            wind_data.u_component.tolist() if wind_data.u_component is not None else []
+        ),
+        "v": (
+            wind_data.v_component.tolist() if wind_data.v_component is not None else []
+        ),
         "ocean_mask": ocean_mask,
         "ocean_mask_lats": mask_lats,
         "ocean_mask_lons": mask_lons,
         "source": (
-            "gfs" if (wind_data.time and (datetime.utcnow() - wind_data.time).total_seconds() < 43200)
-            else "copernicus" if copernicus_provider._has_cdsapi
-            else "synthetic"
+            "gfs"
+            if (
+                wind_data.time
+                and (datetime.utcnow() - wind_data.time).total_seconds() < 43200
+            )
+            else "copernicus" if copernicus_provider._has_cdsapi else "synthetic"
         ),
     }
     if sst_data is not None and sst_data.values is not None:
@@ -1488,29 +1662,46 @@ async def api_get_wind_velocity_format(
     if db_only:
         if db_weather is None:
             return Response(status_code=204)
-        wind_data = db_weather.get_wind_from_db(lat_min, lat_max, lon_min, lon_max, time)
+        wind_data = db_weather.get_wind_from_db(
+            lat_min, lat_max, lon_min, lon_max, time
+        )
         if wind_data is None:
             return Response(status_code=204)
     elif forecast_hour > 0:
         # Direct GFS fetch for specific forecast hour
-        wind_data = gfs_provider.fetch_wind_data(lat_min, lat_max, lon_min, lon_max, time, forecast_hour)
+        wind_data = gfs_provider.fetch_wind_data(
+            lat_min, lat_max, lon_min, lon_max, time, forecast_hour
+        )
         if wind_data is None:
-            raise HTTPException(status_code=404, detail=f"Forecast hour f{forecast_hour:03d} not available")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Forecast hour f{forecast_hour:03d} not available",
+            )
     else:
         wind_data = get_wind_field(lat_min, lat_max, lon_min, lon_max, resolution, time)
 
     # Apply ocean mask — zero out land so particles don't render there
     u_masked, v_masked = _apply_ocean_mask_velocity(
-        wind_data.u_component, wind_data.v_component,
-        wind_data.lats, wind_data.lons,
+        wind_data.u_component,
+        wind_data.v_component,
+        wind_data.lats,
+        wind_data.lons,
     )
 
     # leaflet-velocity format — derive header from actual data arrays
     # (data may come at native resolution, e.g. 0.25° from ERA5)
     actual_lats = wind_data.lats
     actual_lons = wind_data.lons
-    actual_dx = abs(float(actual_lons[1] - actual_lons[0])) if len(actual_lons) > 1 else resolution
-    actual_dy = abs(float(actual_lats[1] - actual_lats[0])) if len(actual_lats) > 1 else resolution
+    actual_dx = (
+        abs(float(actual_lons[1] - actual_lons[0]))
+        if len(actual_lons) > 1
+        else resolution
+    )
+    actual_dy = (
+        abs(float(actual_lats[1] - actual_lats[0]))
+        if len(actual_lats) > 1
+        else resolution
+    )
 
     # leaflet-velocity expects data ordered N→S (descending lat), W→E (ascending lon)
     if len(actual_lats) > 1 and actual_lats[1] > actual_lats[0]:
@@ -1537,7 +1728,11 @@ async def api_get_wind_velocity_format(
         "dy": actual_dy,
         "nx": len(actual_lons),
         "ny": len(actual_lats),
-        "refTime": (wind_data.time.isoformat() if isinstance(wind_data.time, datetime) else time.isoformat()),
+        "refTime": (
+            wind_data.time.isoformat()
+            if isinstance(wind_data.time, datetime)
+            else time.isoformat()
+        ),
     }
 
     u_flat = u_ordered.flatten().tolist()
@@ -1556,7 +1751,9 @@ async def api_get_wind_velocity_format(
 # In-progress prefetch tracking
 _prefetch_running = False
 _prefetch_lock = None  # Will be a threading.Lock
-_last_wind_prefetch_run = None  # (run_date, run_hour) tuple from last successful prefetch
+_last_wind_prefetch_run = (
+    None  # (run_date, run_hour) tuple from last successful prefetch
+)
 
 # File-based cache for wind forecast frames (shared across gunicorn workers)
 _WIND_CACHE_DIR = Path("/tmp/windmar_cache/wind")
@@ -1572,6 +1769,7 @@ def _wind_cache_get(cache_key: str) -> dict | None:
     if p.exists():
         try:
             import json as _json
+
             return _json.loads(p.read_text())
         except Exception:
             return None
@@ -1580,6 +1778,7 @@ def _wind_cache_get(cache_key: str) -> dict | None:
 
 def _wind_cache_put(cache_key: str, data: dict):
     import json as _json
+
     p = _WIND_CACHE_DIR / f"{cache_key}.json"
     tmp = p.with_suffix(".tmp")
     tmp.write_text(_json.dumps(data))
@@ -1592,25 +1791,45 @@ def _build_wind_frames(lat_min, lat_max, lon_min, lon_max, run_date, run_hour):
     Called once after prefetch completes. Result is saved to file cache.
     """
     run_time = datetime.strptime(f"{run_date}{run_hour}", "%Y%m%d%H")
-    hours_status = gfs_provider.get_cached_forecast_hours(lat_min, lat_max, lon_min, lon_max, run_date, run_hour)
+    hours_status = gfs_provider.get_cached_forecast_hours(
+        lat_min, lat_max, lon_min, lon_max, run_date, run_hour
+    )
 
     frames = {}
     for h_info in hours_status:
         if not h_info["cached"]:
             continue
         fh = h_info["forecast_hour"]
-        wind_data = gfs_provider.fetch_wind_data(lat_min, lat_max, lon_min, lon_max, forecast_hour=fh, run_date=run_date, run_hour=run_hour)
+        wind_data = gfs_provider.fetch_wind_data(
+            lat_min,
+            lat_max,
+            lon_min,
+            lon_max,
+            forecast_hour=fh,
+            run_date=run_date,
+            run_hour=run_hour,
+        )
         if wind_data is None:
             continue
 
         u_masked, v_masked = _apply_ocean_mask_velocity(
-            wind_data.u_component, wind_data.v_component,
-            wind_data.lats, wind_data.lons,
+            wind_data.u_component,
+            wind_data.v_component,
+            wind_data.lats,
+            wind_data.lons,
         )
         actual_lats = wind_data.lats
         actual_lons = wind_data.lons
-        actual_dx = abs(float(actual_lons[1] - actual_lons[0])) if len(actual_lons) > 1 else 0.25
-        actual_dy = abs(float(actual_lats[1] - actual_lats[0])) if len(actual_lats) > 1 else 0.25
+        actual_dx = (
+            abs(float(actual_lons[1] - actual_lons[0]))
+            if len(actual_lons) > 1
+            else 0.25
+        )
+        actual_dy = (
+            abs(float(actual_lats[1] - actual_lats[0]))
+            if len(actual_lats) > 1
+            else 0.25
+        )
 
         if len(actual_lats) > 1 and actual_lats[1] > actual_lats[0]:
             u_ordered = u_masked[::-1]
@@ -1639,10 +1858,18 @@ def _build_wind_frames(lat_min, lat_max, lon_min, lon_max, run_date, run_hour):
             "forecastHour": fh,
         }
         frames[str(fh)] = [
-            {"header": {**header, "parameterNumber": 2}, "data": u_ordered.flatten().tolist()},
-            {"header": {**header, "parameterNumber": 3}, "data": v_ordered.flatten().tolist()},
+            {
+                "header": {**header, "parameterNumber": 2},
+                "data": u_ordered.flatten().tolist(),
+            },
+            {
+                "header": {**header, "parameterNumber": 3},
+                "data": v_ordered.flatten().tolist(),
+            },
         ]
-        logger.info(f"Wind frame f{fh:03d} processed ({len(actual_lats)}x{len(actual_lons)})")
+        logger.info(
+            f"Wind frame f{fh:03d} processed ({len(actual_lats)}x{len(actual_lons)})"
+        )
 
     result = {
         "run_date": run_date,
@@ -1665,6 +1892,7 @@ def _get_prefetch_lock():
     global _prefetch_lock
     if _prefetch_lock is None:
         import threading
+
         _prefetch_lock = threading.Lock()
     return _prefetch_lock
 
@@ -1699,14 +1927,18 @@ async def api_get_forecast_status(
         run_date, run_hour = _last_wind_prefetch_run
     else:
         run_date, run_hour = gfs_provider._get_latest_run()
-    hours = gfs_provider.get_cached_forecast_hours(lat_min, lat_max, lon_min, lon_max, run_date, run_hour)
+    hours = gfs_provider.get_cached_forecast_hours(
+        lat_min, lat_max, lon_min, lon_max, run_date, run_hour
+    )
     cached_count = sum(1 for h in hours if h["cached"])
 
     if cached_count == 0 and not _prefetch_running:
         best = gfs_provider.find_best_cached_run(lat_min, lat_max, lon_min, lon_max)
         if best:
             run_date, run_hour = best
-            hours = gfs_provider.get_cached_forecast_hours(lat_min, lat_max, lon_min, lon_max, run_date, run_hour)
+            hours = gfs_provider.get_cached_forecast_hours(
+                lat_min, lat_max, lon_min, lon_max, run_date, run_hour
+            )
     cached_count = sum(1 for h in hours if h["cached"])
     total_count = len(hours)
 
@@ -1736,11 +1968,12 @@ async def api_trigger_forecast_prefetch(
     if is_demo():
         return demo_mode_response("Wind forecast prefetch")
 
-    global _prefetch_running
-
     lock = _get_prefetch_lock()
     if not lock.acquire(blocking=False):
-        return {"status": "already_running", "message": "Prefetch is already in progress"}
+        return {
+            "status": "already_running",
+            "message": "Prefetch is already in progress",
+        }
 
     lock.release()
 
@@ -1785,6 +2018,7 @@ async def api_get_forecast_frames(
     Serves the raw JSON file to avoid parse+re-serialize overhead.
     """
     from starlette.responses import Response
+
     cache_key = _wind_cache_key(lat_min, lat_max, lon_min, lon_max)
     cache_file = _WIND_CACHE_DIR / f"{cache_key}.json"
     if cache_file.exists():
@@ -1811,40 +2045,54 @@ async def api_get_forecast_frames(
 _wave_prefetch_running = False
 _wave_prefetch_lock = None
 
+
 def _get_wave_prefetch_lock():
     global _wave_prefetch_lock
     if _wave_prefetch_lock is None:
         import threading
+
         _wave_prefetch_lock = threading.Lock()
     return _wave_prefetch_lock
+
 
 # File-based cache for wave forecast frames (shared across workers)
 _WAVE_CACHE_DIR = Path("/tmp/windmar_cache/wave")
 _WAVE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+
 def _wave_cache_path(cache_key: str) -> Path:
     return _WAVE_CACHE_DIR / f"{cache_key}.json"
+
 
 def _wave_cache_get(cache_key: str) -> dict | None:
     p = _wave_cache_path(cache_key)
     if p.exists():
         try:
             import json as _json
+
             return _json.loads(p.read_text())
         except Exception:
             return None
     return None
 
+
 def _wave_cache_put(cache_key: str, data: dict):
     import json as _json
+
     p = _wave_cache_path(cache_key)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(_json.dumps(data))
     tmp.rename(p)  # atomic on same filesystem
 
 
-def _cache_covers_bounds(cached_data: dict, lat_min: float, lat_max: float,
-                         lon_min: float, lon_max: float, min_coverage: float = 0.8) -> bool:
+def _cache_covers_bounds(
+    cached_data: dict,
+    lat_min: float,
+    lat_max: float,
+    lon_min: float,
+    lon_max: float,
+    min_coverage: float = 0.8,
+) -> bool:
     """Check whether cached data covers the requested bounding box.
 
     Returns True if the cached lat/lon range covers at least *min_coverage*
@@ -1891,8 +2139,16 @@ def _rebuild_wave_cache_from_db(cache_key, lat_min, lat_max, lon_min, lon_max):
 
     logger.info(f"Rebuilding wave cache from DB: {len(hours)} hours")
 
-    params = ["wave_hs", "wave_dir", "swell_hs", "swell_tp", "swell_dir",
-              "windwave_hs", "windwave_tp", "windwave_dir"]
+    params = [
+        "wave_hs",
+        "wave_dir",
+        "swell_hs",
+        "swell_tp",
+        "swell_dir",
+        "windwave_hs",
+        "windwave_tp",
+        "windwave_dir",
+    ]
     grids = db_weather.get_grids_for_timeline(
         "cmems_wave", params, lat_min, lat_max, lon_min, lon_max, hours
     )
@@ -1926,16 +2182,25 @@ def _rebuild_wave_cache_from_db(cache_key, lat_min, lat_max, lon_min, lon_max):
             _, _, d = grids["wave_dir"][fh]
             frame["direction"] = _sub(d)
 
-        has_decomp = (fh in grids.get("windwave_hs", {}) and
-                      fh in grids.get("swell_hs", {}))
+        has_decomp = fh in grids.get("windwave_hs", {}) and fh in grids.get(
+            "swell_hs", {}
+        )
         if has_decomp:
             frame["windwave"] = {}
-            for p, k in [("windwave_hs", "height"), ("windwave_tp", "period"), ("windwave_dir", "direction")]:
+            for p, k in [
+                ("windwave_hs", "height"),
+                ("windwave_tp", "period"),
+                ("windwave_dir", "direction"),
+            ]:
                 if fh in grids.get(p, {}):
                     _, _, d = grids[p][fh]
                     frame["windwave"][k] = _sub(d)
             frame["swell"] = {}
-            for p, k in [("swell_hs", "height"), ("swell_tp", "period"), ("swell_dir", "direction")]:
+            for p, k in [
+                ("swell_hs", "height"),
+                ("swell_tp", "period"),
+                ("swell_dir", "direction"),
+            ]:
                 if fh in grids.get(p, {}):
                     _, _, d = grids[p][fh]
                     frame["swell"][k] = _sub(d)
@@ -1955,7 +2220,11 @@ def _rebuild_wave_cache_from_db(cache_key, lat_min, lat_max, lon_min, lon_max):
         "ocean_mask": ocean_mask_arr,
         "ocean_mask_lats": mask_lats_arr,
         "ocean_mask_lons": mask_lons_arr,
-        "colorscale": {"min": 0, "max": 6, "colors": ["#00ff00", "#ffff00", "#ff8800", "#ff0000", "#800000"]},
+        "colorscale": {
+            "min": 0,
+            "max": 6,
+            "colors": ["#00ff00", "#ffff00", "#ff8800", "#ff0000", "#800000"],
+        },
         "frames": frames,
     }
 
@@ -1976,8 +2245,13 @@ def _rebuild_current_cache_from_db(cache_key, lat_min, lat_max, lon_min, lon_max
     logger.info(f"Rebuilding current cache from DB: {len(hours)} hours")
 
     grids = db_weather.get_grids_for_timeline(
-        "cmems_current", ["current_u", "current_v"],
-        lat_min, lat_max, lon_min, lon_max, hours
+        "cmems_current",
+        ["current_u", "current_v"],
+        lat_min,
+        lat_max,
+        lon_min,
+        lon_max,
+        hours,
     )
 
     if not grids or "current_u" not in grids or not grids["current_u"]:
@@ -2042,8 +2316,12 @@ async def api_get_wave_forecast_status(
     if cached:
         cached_hours = len(cached.get("frames", {}))
         return {
-            "run_date": cached.get("run_time", "")[:8] if cached.get("run_time") else "",
-            "run_hour": cached.get("run_time", "")[9:11] if cached.get("run_time") else "00",
+            "run_date": (
+                cached.get("run_time", "")[:8] if cached.get("run_time") else ""
+            ),
+            "run_hour": (
+                cached.get("run_time", "")[9:11] if cached.get("run_time") else "00"
+            ),
             "total_hours": total_hours,
             "cached_hours": cached_hours,
             "complete": cached_hours >= total_hours,
@@ -2077,15 +2355,19 @@ async def api_trigger_wave_forecast_prefetch(
     if is_demo():
         return demo_mode_response("Wave forecast prefetch")
 
-    global _wave_prefetch_running
-
     # Check Redis distributed lock first (cross-worker), then local lock
     if _is_wave_prefetch_running():
-        return {"status": "already_running", "message": "Wave prefetch is already in progress"}
+        return {
+            "status": "already_running",
+            "message": "Wave prefetch is already in progress",
+        }
 
     lock = _get_wave_prefetch_lock()
     if not lock.acquire(blocking=False):
-        return {"status": "already_running", "message": "Wave prefetch is already in progress"}
+        return {
+            "status": "already_running",
+            "message": "Wave prefetch is already in progress",
+        }
     lock.release()
 
     def _do_wave_prefetch():
@@ -2107,17 +2389,35 @@ async def api_trigger_wave_forecast_prefetch(
             _wave_prefetch_running = True
 
             # Skip CMEMS download if file cache already covers the requested area
-            cache_key_chk = f"wave_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+            cache_key_chk = (
+                f"wave_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+            )
             existing = _wave_cache_get(cache_key_chk)
-            if existing and len(existing.get("frames", {})) >= 41 and _cache_covers_bounds(existing, lat_min, lat_max, lon_min, lon_max):
-                logger.info("Wave forecast file cache already complete, skipping CMEMS download")
+            if (
+                existing
+                and len(existing.get("frames", {})) >= 41
+                and _cache_covers_bounds(existing, lat_min, lat_max, lon_min, lon_max)
+            ):
+                logger.info(
+                    "Wave forecast file cache already complete, skipping CMEMS download"
+                )
                 return
 
             # Also try to rebuild from DB before downloading from CMEMS
             if db_weather is not None:
-                rebuilt = _rebuild_wave_cache_from_db(cache_key_chk, lat_min, lat_max, lon_min, lon_max)
-                if rebuilt and len(rebuilt.get("frames", {})) >= 41 and _cache_covers_bounds(rebuilt, lat_min, lat_max, lon_min, lon_max):
-                    logger.info("Wave forecast rebuilt from DB, skipping CMEMS download")
+                rebuilt = _rebuild_wave_cache_from_db(
+                    cache_key_chk, lat_min, lat_max, lon_min, lon_max
+                )
+                if (
+                    rebuilt
+                    and len(rebuilt.get("frames", {})) >= 41
+                    and _cache_covers_bounds(
+                        rebuilt, lat_min, lat_max, lon_min, lon_max
+                    )
+                ):
+                    logger.info(
+                        "Wave forecast rebuilt from DB, skipping CMEMS download"
+                    )
                     return
 
             # Remove stale file cache entry so status endpoint doesn't report old data
@@ -2128,7 +2428,9 @@ async def api_trigger_wave_forecast_prefetch(
 
             logger.info("CMEMS wave forecast prefetch started")
 
-            result = copernicus_provider.fetch_wave_forecast(lat_min, lat_max, lon_min, lon_max)
+            result = copernicus_provider.fetch_wave_forecast(
+                lat_min, lat_max, lon_min, lon_max
+            )
             if result is None:
                 logger.error("Wave forecast fetch returned None")
                 return
@@ -2143,7 +2445,9 @@ async def api_trigger_wave_forecast_prefetch(
             # Dynamic STEP: keep ~250 grid points per axis regardless of bbox span
             max_dim = max(len(first_wd.lats), len(first_wd.lons))
             STEP = max(1, round(max_dim / 250))
-            logger.info(f"Wave forecast: grid {len(first_wd.lats)}x{len(first_wd.lons)}, STEP={STEP}")
+            logger.info(
+                f"Wave forecast: grid {len(first_wd.lats)}x{len(first_wd.lons)}, STEP={STEP}"
+            )
             shared_lats = first_wd.lats[::STEP].tolist()
             shared_lons = first_wd.lons[::STEP].tolist()
 
@@ -2164,7 +2468,9 @@ async def api_trigger_wave_forecast_prefetch(
                 if wd.wave_direction is not None:
                     frame["direction"] = _subsample_round(wd.wave_direction)
 
-                has_decomp = wd.windwave_height is not None and wd.swell_height is not None
+                has_decomp = (
+                    wd.windwave_height is not None and wd.swell_height is not None
+                )
                 if has_decomp:
                     frame["windwave"] = {
                         "height": _subsample_round(wd.windwave_height),
@@ -2180,21 +2486,34 @@ async def api_trigger_wave_forecast_prefetch(
                 frames[str(fh)] = frame
 
             cache_key = f"wave_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
-            _wave_cache_put(cache_key, {
-                "run_time": first_wd.time.isoformat() if first_wd.time else "",
-                "total_hours": 41,
-                "cached_hours": len(frames),
-                "source": "cmems",
-                "lats": shared_lats,
-                "lons": shared_lons,
-                "ny": len(shared_lats),
-                "nx": len(shared_lons),
-                "ocean_mask": ocean_mask_arr,
-                "ocean_mask_lats": mask_lats_arr,
-                "ocean_mask_lons": mask_lons_arr,
-                "colorscale": {"min": 0, "max": 6, "colors": ["#00ff00", "#ffff00", "#ff8800", "#ff0000", "#800000"]},
-                "frames": frames,
-            })
+            _wave_cache_put(
+                cache_key,
+                {
+                    "run_time": first_wd.time.isoformat() if first_wd.time else "",
+                    "total_hours": 41,
+                    "cached_hours": len(frames),
+                    "source": "cmems",
+                    "lats": shared_lats,
+                    "lons": shared_lons,
+                    "ny": len(shared_lats),
+                    "nx": len(shared_lons),
+                    "ocean_mask": ocean_mask_arr,
+                    "ocean_mask_lats": mask_lats_arr,
+                    "ocean_mask_lons": mask_lons_arr,
+                    "colorscale": {
+                        "min": 0,
+                        "max": 6,
+                        "colors": [
+                            "#00ff00",
+                            "#ffff00",
+                            "#ff8800",
+                            "#ff0000",
+                            "#800000",
+                        ],
+                    },
+                    "frames": frames,
+                },
+            )
             logger.info(f"Wave forecast cached: {len(frames)} frames")
 
             # Store full-resolution frames in PostgreSQL for route optimizer
@@ -2217,7 +2536,10 @@ async def api_trigger_wave_forecast_prefetch(
             pflock.release()
 
     background_tasks.add_task(_do_wave_prefetch)
-    return {"status": "started", "message": "Wave forecast prefetch triggered in background"}
+    return {
+        "status": "started",
+        "message": "Wave forecast prefetch triggered in background",
+    }
 
 
 @app.get("/api/weather/forecast/wave/frames")
@@ -2232,10 +2554,13 @@ async def api_get_wave_forecast_frames(
     Serves the raw JSON file to avoid parse+re-serialize overhead.
     """
     from starlette.responses import Response as RawResponse
+
     cache_key = f"wave_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
     cache_file = _wave_cache_path(cache_key)
     if cache_file.exists():
-        return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
+        return RawResponse(
+            content=cache_file.read_bytes(), media_type="application/json"
+        )
 
     # Fallback: rebuild from PostgreSQL
     cached = await asyncio.to_thread(
@@ -2271,12 +2596,15 @@ _CURRENT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 _REDIS_CURRENT_PREFETCH_LOCK = "windmar:current_prefetch_lock"
 _REDIS_CURRENT_PREFETCH_STATUS = "windmar:current_prefetch_running"
 
+
 def _get_current_prefetch_lock():
     global _current_prefetch_lock
     if _current_prefetch_lock is None:
         import threading
+
         _current_prefetch_lock = threading.Lock()
     return _current_prefetch_lock
+
 
 def _is_current_prefetch_running() -> bool:
     r = _get_redis()
@@ -2287,21 +2615,26 @@ def _is_current_prefetch_running() -> bool:
             pass
     return _current_prefetch_running
 
+
 def _current_cache_path(cache_key: str) -> Path:
     return _CURRENT_CACHE_DIR / f"{cache_key}.json"
+
 
 def _current_cache_get(cache_key: str) -> dict | None:
     p = _current_cache_path(cache_key)
     if p.exists():
         try:
             import json as _json
+
             return _json.loads(p.read_text())
         except Exception:
             return None
     return None
 
+
 def _current_cache_put(cache_key: str, data: dict):
     import json as _json
+
     p = _current_cache_path(cache_key)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(_json.dumps(data))
@@ -2354,14 +2687,18 @@ async def api_trigger_current_forecast_prefetch(
     if is_demo():
         return demo_mode_response("Current forecast prefetch")
 
-    global _current_prefetch_running
-
     if _is_current_prefetch_running():
-        return {"status": "already_running", "message": "Current prefetch is already in progress"}
+        return {
+            "status": "already_running",
+            "message": "Current prefetch is already in progress",
+        }
 
     lock = _get_current_prefetch_lock()
     if not lock.acquire(blocking=False):
-        return {"status": "already_running", "message": "Current prefetch is already in progress"}
+        return {
+            "status": "already_running",
+            "message": "Current prefetch is already in progress",
+        }
     lock.release()
 
     def _do_current_prefetch():
@@ -2382,17 +2719,35 @@ async def api_trigger_current_forecast_prefetch(
             _current_prefetch_running = True
 
             # Skip CMEMS download if file cache already covers the requested area
-            cache_key_chk = f"current_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+            cache_key_chk = (
+                f"current_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+            )
             existing = _current_cache_get(cache_key_chk)
-            if existing and len(existing.get("frames", {})) >= 41 and _cache_covers_bounds(existing, lat_min, lat_max, lon_min, lon_max):
-                logger.info("Current forecast file cache already complete, skipping CMEMS download")
+            if (
+                existing
+                and len(existing.get("frames", {})) >= 41
+                and _cache_covers_bounds(existing, lat_min, lat_max, lon_min, lon_max)
+            ):
+                logger.info(
+                    "Current forecast file cache already complete, skipping CMEMS download"
+                )
                 return
 
             # Also try to rebuild from DB before downloading from CMEMS
             if db_weather is not None:
-                rebuilt = _rebuild_current_cache_from_db(cache_key_chk, lat_min, lat_max, lon_min, lon_max)
-                if rebuilt and len(rebuilt.get("frames", {})) >= 41 and _cache_covers_bounds(rebuilt, lat_min, lat_max, lon_min, lon_max):
-                    logger.info("Current forecast rebuilt from DB, skipping CMEMS download")
+                rebuilt = _rebuild_current_cache_from_db(
+                    cache_key_chk, lat_min, lat_max, lon_min, lon_max
+                )
+                if (
+                    rebuilt
+                    and len(rebuilt.get("frames", {})) >= 41
+                    and _cache_covers_bounds(
+                        rebuilt, lat_min, lat_max, lon_min, lon_max
+                    )
+                ):
+                    logger.info(
+                        "Current forecast rebuilt from DB, skipping CMEMS download"
+                    )
                     return
 
             # Remove stale file cache entry so status endpoint doesn't report old data
@@ -2403,7 +2758,9 @@ async def api_trigger_current_forecast_prefetch(
 
             logger.info("CMEMS current forecast prefetch started")
 
-            result = copernicus_provider.fetch_current_forecast(lat_min, lat_max, lon_min, lon_max)
+            result = copernicus_provider.fetch_current_forecast(
+                lat_min, lat_max, lon_min, lon_max
+            )
             if result is None:
                 logger.error("Current forecast fetch returned None")
                 return
@@ -2412,7 +2769,9 @@ async def api_trigger_current_forecast_prefetch(
             # Dynamic STEP: keep ~250 grid points per axis regardless of bbox span
             max_dim = max(len(first_wd.lats), len(first_wd.lons))
             STEP = max(1, round(max_dim / 250))
-            logger.info(f"Current forecast: grid {len(first_wd.lats)}x{len(first_wd.lons)}, STEP={STEP}")
+            logger.info(
+                f"Current forecast: grid {len(first_wd.lats)}x{len(first_wd.lons)}, STEP={STEP}"
+            )
             sub_lats = first_wd.lats[::STEP]  # numpy, S→N
             sub_lons = first_wd.lons[::STEP]
 
@@ -2424,25 +2783,32 @@ async def api_trigger_current_forecast_prefetch(
                     u_sub = wd.u_component[::STEP, ::STEP]
                     v_sub = wd.v_component[::STEP, ::STEP]
                     # Ocean mask: zero out land points
-                    u_m, v_m = _apply_ocean_mask_velocity(u_sub, v_sub, sub_lats, sub_lons)
+                    u_m, v_m = _apply_ocean_mask_velocity(
+                        u_sub, v_sub, sub_lats, sub_lons
+                    )
                     # Flip N→S for leaflet-velocity (lats stay S→N for header)
                     frames[str(fh)] = {
                         "u": np.round(u_m[::-1], 2).tolist(),
                         "v": np.round(v_m[::-1], 2).tolist(),
                     }
 
-            cache_key = f"current_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
-            _current_cache_put(cache_key, {
-                "run_time": first_wd.time.isoformat() if first_wd.time else "",
-                "total_hours": 41,
-                "cached_hours": len(frames),
-                "source": "cmems",
-                "lats": sub_lats.tolist(),
-                "lons": sub_lons.tolist(),
-                "ny": len(sub_lats),
-                "nx": len(sub_lons),
-                "frames": frames,
-            })
+            cache_key = (
+                f"current_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+            )
+            _current_cache_put(
+                cache_key,
+                {
+                    "run_time": first_wd.time.isoformat() if first_wd.time else "",
+                    "total_hours": 41,
+                    "cached_hours": len(frames),
+                    "source": "cmems",
+                    "lats": sub_lats.tolist(),
+                    "lons": sub_lons.tolist(),
+                    "ny": len(sub_lats),
+                    "nx": len(sub_lons),
+                    "frames": frames,
+                },
+            )
             logger.info(f"Current forecast cached: {len(frames)} frames")
 
             # Store full-resolution frames in PostgreSQL for route optimizer
@@ -2459,13 +2825,18 @@ async def api_trigger_current_forecast_prefetch(
             _current_prefetch_running = False
             if r is not None:
                 try:
-                    r.delete(_REDIS_CURRENT_PREFETCH_LOCK, _REDIS_CURRENT_PREFETCH_STATUS)
+                    r.delete(
+                        _REDIS_CURRENT_PREFETCH_LOCK, _REDIS_CURRENT_PREFETCH_STATUS
+                    )
                 except Exception:
                     pass
             pflock.release()
 
     background_tasks.add_task(_do_current_prefetch)
-    return {"status": "started", "message": "Current forecast prefetch triggered in background"}
+    return {
+        "status": "started",
+        "message": "Current forecast prefetch triggered in background",
+    }
 
 
 @app.get("/api/weather/forecast/current/frames")
@@ -2480,10 +2851,13 @@ async def api_get_current_forecast_frames(
     Serves the raw JSON file to avoid parse+re-serialize overhead.
     """
     from starlette.responses import Response as RawResponse
+
     cache_key = f"current_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
     cache_file = _current_cache_path(cache_key)
     if cache_file.exists():
-        return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
+        return RawResponse(
+            content=cache_file.read_bytes(), media_type="application/json"
+        )
 
     # Fallback: rebuild from PostgreSQL
     cached = await asyncio.to_thread(
@@ -2523,6 +2897,7 @@ def _get_ice_prefetch_lock():
     global _ice_prefetch_lock
     if _ice_prefetch_lock is None:
         import threading
+
         _ice_prefetch_lock = threading.Lock()
     return _ice_prefetch_lock
 
@@ -2546,6 +2921,7 @@ def _ice_cache_get(cache_key: str) -> dict | None:
     if p.exists():
         try:
             import json as _json
+
             return _json.loads(p.read_text())
         except Exception:
             return None
@@ -2554,6 +2930,7 @@ def _ice_cache_get(cache_key: str) -> dict | None:
 
 def _ice_cache_put(cache_key: str, data: dict):
     import json as _json
+
     p = _ice_cache_path(cache_key)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(_json.dumps(data))
@@ -2572,8 +2949,7 @@ def _rebuild_ice_cache_from_db(cache_key, lat_min, lat_max, lon_min, lon_max):
     logger.info(f"Rebuilding ice cache from DB: {len(hours)} hours")
 
     grids = db_weather.get_grids_for_timeline(
-        "cmems_ice", ["ice_siconc"],
-        lat_min, lat_max, lon_min, lon_max, hours
+        "cmems_ice", ["ice_siconc"], lat_min, lat_max, lon_min, lon_max, hours
     )
 
     if not grids or "ice_siconc" not in grids or not grids["ice_siconc"]:
@@ -2634,7 +3010,9 @@ async def api_get_ice_forecast_status(
     if cached:
         cached_hours = len(cached.get("frames", {}))
         # total_hours matches cached_hours once prefetch finishes (CMEMS may have < 10 days)
-        total_hours = cached_hours if not prefetch_running else max(cached_hours + 1, 10)
+        total_hours = (
+            cached_hours if not prefetch_running else max(cached_hours + 1, 10)
+        )
         return {
             "total_hours": total_hours,
             "cached_hours": cached_hours,
@@ -2662,14 +3040,18 @@ async def api_trigger_ice_forecast_prefetch(
     if is_demo():
         return demo_mode_response("Ice forecast prefetch")
 
-    global _ice_prefetch_running
-
     if _is_ice_prefetch_running():
-        return {"status": "already_running", "message": "Ice prefetch is already in progress"}
+        return {
+            "status": "already_running",
+            "message": "Ice prefetch is already in progress",
+        }
 
     lock = _get_ice_prefetch_lock()
     if not lock.acquire(blocking=False):
-        return {"status": "already_running", "message": "Ice prefetch is already in progress"}
+        return {
+            "status": "already_running",
+            "message": "Ice prefetch is already in progress",
+        }
     lock.release()
 
     def _do_ice_prefetch():
@@ -2689,16 +3071,32 @@ async def api_trigger_ice_forecast_prefetch(
 
             _ice_prefetch_running = True
 
-            cache_key_chk = f"ice_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+            cache_key_chk = (
+                f"ice_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+            )
             existing = _ice_cache_get(cache_key_chk)
-            if existing and len(existing.get("frames", {})) >= 10 and _cache_covers_bounds(existing, lat_min, lat_max, lon_min, lon_max):
-                logger.info("Ice forecast file cache already complete, skipping CMEMS download")
+            if (
+                existing
+                and len(existing.get("frames", {})) >= 10
+                and _cache_covers_bounds(existing, lat_min, lat_max, lon_min, lon_max)
+            ):
+                logger.info(
+                    "Ice forecast file cache already complete, skipping CMEMS download"
+                )
                 return
 
             # Try to rebuild from DB before downloading from CMEMS
             if db_weather is not None:
-                rebuilt = _rebuild_ice_cache_from_db(cache_key_chk, lat_min, lat_max, lon_min, lon_max)
-                if rebuilt and len(rebuilt.get("frames", {})) >= 10 and _cache_covers_bounds(rebuilt, lat_min, lat_max, lon_min, lon_max):
+                rebuilt = _rebuild_ice_cache_from_db(
+                    cache_key_chk, lat_min, lat_max, lon_min, lon_max
+                )
+                if (
+                    rebuilt
+                    and len(rebuilt.get("frames", {})) >= 10
+                    and _cache_covers_bounds(
+                        rebuilt, lat_min, lat_max, lon_min, lon_max
+                    )
+                ):
                     logger.info("Ice forecast rebuilt from DB, skipping CMEMS download")
                     return
 
@@ -2710,11 +3108,15 @@ async def api_trigger_ice_forecast_prefetch(
 
             logger.info("CMEMS ice forecast prefetch started")
 
-            result = copernicus_provider.fetch_ice_forecast(lat_min, lat_max, lon_min, lon_max)
+            result = copernicus_provider.fetch_ice_forecast(
+                lat_min, lat_max, lon_min, lon_max
+            )
             if result is None:
                 # Fallback to synthetic
                 logger.info("CMEMS ice forecast unavailable, generating synthetic")
-                result = synthetic_provider.generate_ice_forecast(lat_min, lat_max, lon_min, lon_max)
+                result = synthetic_provider.generate_ice_forecast(
+                    lat_min, lat_max, lon_min, lon_max
+                )
 
             if not result:
                 logger.error("Ice forecast fetch returned empty")
@@ -2723,7 +3125,9 @@ async def api_trigger_ice_forecast_prefetch(
             first_wd = next(iter(result.values()))
             max_dim = max(len(first_wd.lats), len(first_wd.lons))
             STEP = max(1, round(max_dim / 250))
-            logger.info(f"Ice forecast: grid {len(first_wd.lats)}x{len(first_wd.lons)}, STEP={STEP}")
+            logger.info(
+                f"Ice forecast: grid {len(first_wd.lats)}x{len(first_wd.lons)}, STEP={STEP}"
+            )
             sub_lats = first_wd.lats[::STEP]
             sub_lons = first_wd.lons[::STEP]
 
@@ -2733,27 +3137,42 @@ async def api_trigger_ice_forecast_prefetch(
 
             frames = {}
             for fh, wd in sorted(result.items()):
-                siconc = wd.ice_concentration if wd.ice_concentration is not None else wd.values
+                siconc = (
+                    wd.ice_concentration
+                    if wd.ice_concentration is not None
+                    else wd.values
+                )
                 if siconc is not None:
                     frames[str(fh)] = {
                         "data": np.round(siconc[::STEP, ::STEP], 4).tolist(),
                     }
 
             cache_key = f"ice_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
-            _ice_cache_put(cache_key, {
-                "run_time": first_wd.time.isoformat() if first_wd.time else "",
-                "total_hours": len(frames),
-                "cached_hours": len(frames),
-                "source": "cmems",
-                "lats": sub_lats.tolist() if hasattr(sub_lats, 'tolist') else list(sub_lats),
-                "lons": sub_lons.tolist() if hasattr(sub_lons, 'tolist') else list(sub_lons),
-                "ny": len(sub_lats),
-                "nx": len(sub_lons),
-                "ocean_mask": ocean_mask_arr,
-                "ocean_mask_lats": mask_lats_arr,
-                "ocean_mask_lons": mask_lons_arr,
-                "frames": frames,
-            })
+            _ice_cache_put(
+                cache_key,
+                {
+                    "run_time": first_wd.time.isoformat() if first_wd.time else "",
+                    "total_hours": len(frames),
+                    "cached_hours": len(frames),
+                    "source": "cmems",
+                    "lats": (
+                        sub_lats.tolist()
+                        if hasattr(sub_lats, "tolist")
+                        else list(sub_lats)
+                    ),
+                    "lons": (
+                        sub_lons.tolist()
+                        if hasattr(sub_lons, "tolist")
+                        else list(sub_lons)
+                    ),
+                    "ny": len(sub_lats),
+                    "nx": len(sub_lons),
+                    "ocean_mask": ocean_mask_arr,
+                    "ocean_mask_lats": mask_lats_arr,
+                    "ocean_mask_lons": mask_lons_arr,
+                    "frames": frames,
+                },
+            )
             logger.info(f"Ice forecast cached: {len(frames)} frames")
 
             # Store in PostgreSQL for persistence
@@ -2776,7 +3195,10 @@ async def api_trigger_ice_forecast_prefetch(
             pflock.release()
 
     background_tasks.add_task(_do_ice_prefetch)
-    return {"status": "started", "message": "Ice forecast prefetch triggered in background"}
+    return {
+        "status": "started",
+        "message": "Ice forecast prefetch triggered in background",
+    }
 
 
 @app.get("/api/weather/forecast/ice/frames")
@@ -2791,10 +3213,13 @@ async def api_get_ice_forecast_frames(
     Serves the raw JSON file to avoid parse+re-serialize overhead.
     """
     from starlette.responses import Response as RawResponse
+
     cache_key = f"ice_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
     cache_file = _ice_cache_path(cache_key)
     if cache_file.exists():
-        return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
+        return RawResponse(
+            content=cache_file.read_bytes(), media_type="application/json"
+        )
 
     # Fallback: rebuild from PostgreSQL
     cached = await asyncio.to_thread(
@@ -2834,6 +3259,7 @@ def _get_sst_prefetch_lock():
     global _sst_prefetch_lock
     if _sst_prefetch_lock is None:
         import threading
+
         _sst_prefetch_lock = threading.Lock()
     return _sst_prefetch_lock
 
@@ -2857,6 +3283,7 @@ def _sst_cache_get(cache_key: str) -> dict | None:
     if p.exists():
         try:
             import json as _json
+
             return _json.loads(p.read_text())
         except Exception:
             return None
@@ -2865,6 +3292,7 @@ def _sst_cache_get(cache_key: str) -> dict | None:
 
 def _sst_cache_put(cache_key: str, data: dict):
     import json as _json
+
     p = _sst_cache_path(cache_key)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(_json.dumps(data))
@@ -2886,7 +3314,9 @@ async def api_get_sst_forecast_status(
 
     if cached:
         cached_hours = len(cached.get("frames", {}))
-        total_hours = cached_hours if not prefetch_running else max(cached_hours + 1, 41)
+        total_hours = (
+            cached_hours if not prefetch_running else max(cached_hours + 1, 41)
+        )
         return {
             "total_hours": total_hours,
             "cached_hours": cached_hours,
@@ -2914,14 +3344,18 @@ async def api_trigger_sst_forecast_prefetch(
     if is_demo():
         return demo_mode_response("SST forecast prefetch")
 
-    global _sst_prefetch_running
-
     if _is_sst_prefetch_running():
-        return {"status": "already_running", "message": "SST prefetch is already in progress"}
+        return {
+            "status": "already_running",
+            "message": "SST prefetch is already in progress",
+        }
 
     lock = _get_sst_prefetch_lock()
     if not lock.acquire(blocking=False):
-        return {"status": "already_running", "message": "SST prefetch is already in progress"}
+        return {
+            "status": "already_running",
+            "message": "SST prefetch is already in progress",
+        }
     lock.release()
 
     def _do_sst_prefetch():
@@ -2941,10 +3375,18 @@ async def api_trigger_sst_forecast_prefetch(
 
             _sst_prefetch_running = True
 
-            cache_key_chk = f"sst_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+            cache_key_chk = (
+                f"sst_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+            )
             existing = _sst_cache_get(cache_key_chk)
-            if existing and len(existing.get("frames", {})) >= 30 and _cache_covers_bounds(existing, lat_min, lat_max, lon_min, lon_max):
-                logger.info("SST forecast file cache already complete, skipping CMEMS download")
+            if (
+                existing
+                and len(existing.get("frames", {})) >= 30
+                and _cache_covers_bounds(existing, lat_min, lat_max, lon_min, lon_max)
+            ):
+                logger.info(
+                    "SST forecast file cache already complete, skipping CMEMS download"
+                )
                 return
 
             # Remove stale file cache
@@ -2955,7 +3397,9 @@ async def api_trigger_sst_forecast_prefetch(
 
             logger.info("CMEMS SST forecast prefetch started")
 
-            result = copernicus_provider.fetch_sst_forecast(lat_min, lat_max, lon_min, lon_max)
+            result = copernicus_provider.fetch_sst_forecast(
+                lat_min, lat_max, lon_min, lon_max
+            )
             if not result:
                 logger.error("SST forecast fetch returned empty")
                 return
@@ -2963,7 +3407,9 @@ async def api_trigger_sst_forecast_prefetch(
             first_wd = next(iter(result.values()))
             max_dim = max(len(first_wd.lats), len(first_wd.lons))
             STEP = max(1, round(max_dim / 250))
-            logger.info(f"SST forecast: grid {len(first_wd.lats)}x{len(first_wd.lons)}, STEP={STEP}")
+            logger.info(
+                f"SST forecast: grid {len(first_wd.lats)}x{len(first_wd.lons)}, STEP={STEP}"
+            )
             sub_lats = first_wd.lats[::STEP]
             sub_lons = first_wd.lons[::STEP]
 
@@ -2980,21 +3426,43 @@ async def api_trigger_sst_forecast_prefetch(
                     }
 
             cache_key = f"sst_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
-            _sst_cache_put(cache_key, {
-                "run_time": first_wd.time.isoformat() if first_wd.time else "",
-                "total_hours": len(frames),
-                "cached_hours": len(frames),
-                "source": "cmems",
-                "lats": sub_lats.tolist() if hasattr(sub_lats, 'tolist') else list(sub_lats),
-                "lons": sub_lons.tolist() if hasattr(sub_lons, 'tolist') else list(sub_lons),
-                "ny": len(sub_lats),
-                "nx": len(sub_lons),
-                "ocean_mask": ocean_mask_arr,
-                "ocean_mask_lats": mask_lats_arr,
-                "ocean_mask_lons": mask_lons_arr,
-                "colorscale": {"min": -2, "max": 32, "colors": ["#0000ff", "#00ccff", "#00ff88", "#ffff00", "#ff8800", "#ff0000"]},
-                "frames": frames,
-            })
+            _sst_cache_put(
+                cache_key,
+                {
+                    "run_time": first_wd.time.isoformat() if first_wd.time else "",
+                    "total_hours": len(frames),
+                    "cached_hours": len(frames),
+                    "source": "cmems",
+                    "lats": (
+                        sub_lats.tolist()
+                        if hasattr(sub_lats, "tolist")
+                        else list(sub_lats)
+                    ),
+                    "lons": (
+                        sub_lons.tolist()
+                        if hasattr(sub_lons, "tolist")
+                        else list(sub_lons)
+                    ),
+                    "ny": len(sub_lats),
+                    "nx": len(sub_lons),
+                    "ocean_mask": ocean_mask_arr,
+                    "ocean_mask_lats": mask_lats_arr,
+                    "ocean_mask_lons": mask_lons_arr,
+                    "colorscale": {
+                        "min": -2,
+                        "max": 32,
+                        "colors": [
+                            "#0000ff",
+                            "#00ccff",
+                            "#00ff88",
+                            "#ffff00",
+                            "#ff8800",
+                            "#ff0000",
+                        ],
+                    },
+                    "frames": frames,
+                },
+            )
             logger.info(f"SST forecast cached: {len(frames)} frames")
 
         except Exception as e:
@@ -3009,7 +3477,10 @@ async def api_trigger_sst_forecast_prefetch(
             pflock.release()
 
     background_tasks.add_task(_do_sst_prefetch)
-    return {"status": "started", "message": "SST forecast prefetch triggered in background"}
+    return {
+        "status": "started",
+        "message": "SST forecast prefetch triggered in background",
+    }
 
 
 @app.get("/api/weather/forecast/sst/frames")
@@ -3024,10 +3495,13 @@ async def api_get_sst_forecast_frames(
     Serves the raw JSON file to avoid parse+re-serialize overhead.
     """
     from starlette.responses import Response as RawResponse
+
     cache_key = f"sst_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
     cache_file = _sst_cache_path(cache_key)
     if cache_file.exists():
-        return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
+        return RawResponse(
+            content=cache_file.read_bytes(), media_type="application/json"
+        )
 
     return {
         "run_time": "",
@@ -3059,6 +3533,7 @@ def _get_vis_prefetch_lock():
     global _vis_prefetch_lock
     if _vis_prefetch_lock is None:
         import threading
+
         _vis_prefetch_lock = threading.Lock()
     return _vis_prefetch_lock
 
@@ -3082,6 +3557,7 @@ def _vis_cache_get(cache_key: str) -> dict | None:
     if p.exists():
         try:
             import json as _json
+
             return _json.loads(p.read_text())
         except Exception:
             return None
@@ -3090,6 +3566,7 @@ def _vis_cache_get(cache_key: str) -> dict | None:
 
 def _vis_cache_put(cache_key: str, data: dict):
     import json as _json
+
     p = _vis_cache_path(cache_key)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(_json.dumps(data))
@@ -3111,7 +3588,9 @@ async def api_get_vis_forecast_status(
 
     if cached:
         cached_hours = len(cached.get("frames", {}))
-        total_hours = cached_hours if not prefetch_running else max(cached_hours + 1, 41)
+        total_hours = (
+            cached_hours if not prefetch_running else max(cached_hours + 1, 41)
+        )
         return {
             "total_hours": total_hours,
             "cached_hours": cached_hours,
@@ -3139,14 +3618,18 @@ async def api_trigger_vis_forecast_prefetch(
     if is_demo():
         return demo_mode_response("Visibility forecast prefetch")
 
-    global _vis_prefetch_running
-
     if _is_vis_prefetch_running():
-        return {"status": "already_running", "message": "Visibility prefetch is already in progress"}
+        return {
+            "status": "already_running",
+            "message": "Visibility prefetch is already in progress",
+        }
 
     lock = _get_vis_prefetch_lock()
     if not lock.acquire(blocking=False):
-        return {"status": "already_running", "message": "Visibility prefetch is already in progress"}
+        return {
+            "status": "already_running",
+            "message": "Visibility prefetch is already in progress",
+        }
     lock.release()
 
     def _do_vis_prefetch():
@@ -3166,10 +3649,18 @@ async def api_trigger_vis_forecast_prefetch(
 
             _vis_prefetch_running = True
 
-            cache_key_chk = f"vis_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+            cache_key_chk = (
+                f"vis_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
+            )
             existing = _vis_cache_get(cache_key_chk)
-            if existing and len(existing.get("frames", {})) >= 30 and _cache_covers_bounds(existing, lat_min, lat_max, lon_min, lon_max):
-                logger.info("Visibility forecast file cache already complete, skipping GFS download")
+            if (
+                existing
+                and len(existing.get("frames", {})) >= 30
+                and _cache_covers_bounds(existing, lat_min, lat_max, lon_min, lon_max)
+            ):
+                logger.info(
+                    "Visibility forecast file cache already complete, skipping GFS download"
+                )
                 return
 
             # Remove stale file cache
@@ -3180,7 +3671,9 @@ async def api_trigger_vis_forecast_prefetch(
 
             logger.info("GFS visibility forecast prefetch started")
 
-            result = gfs_provider.fetch_visibility_forecast(lat_min, lat_max, lon_min, lon_max)
+            result = gfs_provider.fetch_visibility_forecast(
+                lat_min, lat_max, lon_min, lon_max
+            )
             if not result:
                 logger.error("Visibility forecast fetch returned empty")
                 return
@@ -3188,7 +3681,9 @@ async def api_trigger_vis_forecast_prefetch(
             first_wd = next(iter(result.values()))
             max_dim = max(len(first_wd.lats), len(first_wd.lons))
             STEP = max(1, round(max_dim / 250))
-            logger.info(f"Visibility forecast: grid {len(first_wd.lats)}x{len(first_wd.lons)}, STEP={STEP}")
+            logger.info(
+                f"Visibility forecast: grid {len(first_wd.lats)}x{len(first_wd.lons)}, STEP={STEP}"
+            )
             sub_lats = first_wd.lats[::STEP]
             sub_lons = first_wd.lons[::STEP]
 
@@ -3205,21 +3700,42 @@ async def api_trigger_vis_forecast_prefetch(
                     }
 
             cache_key = f"vis_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
-            _vis_cache_put(cache_key, {
-                "run_time": first_wd.time.isoformat() if first_wd.time else "",
-                "total_hours": len(frames),
-                "cached_hours": len(frames),
-                "source": "gfs",
-                "lats": sub_lats.tolist() if hasattr(sub_lats, 'tolist') else list(sub_lats),
-                "lons": sub_lons.tolist() if hasattr(sub_lons, 'tolist') else list(sub_lons),
-                "ny": len(sub_lats),
-                "nx": len(sub_lons),
-                "ocean_mask": ocean_mask_arr,
-                "ocean_mask_lats": mask_lats_arr,
-                "ocean_mask_lons": mask_lons_arr,
-                "colorscale": {"min": 0, "max": 50, "colors": ["#ff0000", "#ff8800", "#ffff00", "#88ff00", "#00ff00"]},
-                "frames": frames,
-            })
+            _vis_cache_put(
+                cache_key,
+                {
+                    "run_time": first_wd.time.isoformat() if first_wd.time else "",
+                    "total_hours": len(frames),
+                    "cached_hours": len(frames),
+                    "source": "gfs",
+                    "lats": (
+                        sub_lats.tolist()
+                        if hasattr(sub_lats, "tolist")
+                        else list(sub_lats)
+                    ),
+                    "lons": (
+                        sub_lons.tolist()
+                        if hasattr(sub_lons, "tolist")
+                        else list(sub_lons)
+                    ),
+                    "ny": len(sub_lats),
+                    "nx": len(sub_lons),
+                    "ocean_mask": ocean_mask_arr,
+                    "ocean_mask_lats": mask_lats_arr,
+                    "ocean_mask_lons": mask_lons_arr,
+                    "colorscale": {
+                        "min": 0,
+                        "max": 50,
+                        "colors": [
+                            "#ff0000",
+                            "#ff8800",
+                            "#ffff00",
+                            "#88ff00",
+                            "#00ff00",
+                        ],
+                    },
+                    "frames": frames,
+                },
+            )
             logger.info(f"Visibility forecast cached: {len(frames)} frames")
 
         except Exception as e:
@@ -3234,7 +3750,10 @@ async def api_trigger_vis_forecast_prefetch(
             pflock.release()
 
     background_tasks.add_task(_do_vis_prefetch)
-    return {"status": "started", "message": "Visibility forecast prefetch triggered in background"}
+    return {
+        "status": "started",
+        "message": "Visibility forecast prefetch triggered in background",
+    }
 
 
 @app.get("/api/weather/forecast/visibility/frames")
@@ -3249,10 +3768,13 @@ async def api_get_vis_forecast_frames(
     Serves the raw JSON file to avoid parse+re-serialize overhead.
     """
     from starlette.responses import Response as RawResponse
+
     cache_key = f"vis_{lat_min:.0f}_{lat_max:.0f}_{lon_min:.0f}_{lon_max:.0f}"
     cache_file = _vis_cache_path(cache_key)
     if cache_file.exists():
-        return RawResponse(content=cache_file.read_bytes(), media_type="application/json")
+        return RawResponse(
+            content=cache_file.read_bytes(), media_type="application/json"
+        )
 
     return {
         "run_time": "",
@@ -3297,10 +3819,14 @@ async def api_get_wave_field(
         wind_data = get_wind_field(lat_min, lat_max, lon_min, lon_max, resolution, time)
 
         # Get waves (CMEMS or synthetic)
-        wave_data = get_wave_field(lat_min, lat_max, lon_min, lon_max, resolution, wind_data)
+        wave_data = get_wave_field(
+            lat_min, lat_max, lon_min, lon_max, resolution, wind_data
+        )
 
     # High-resolution ocean mask (0.05° ≈ 5.5km) via vectorized numpy
-    mask_lats, mask_lons, ocean_mask = _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05)
+    mask_lats, mask_lons, ocean_mask = _build_ocean_mask(
+        lat_min, lat_max, lon_min, lon_max, step=0.05
+    )
 
     # Build response with combined data
     response = {
@@ -3322,7 +3848,9 @@ async def api_get_wave_field(
         "ocean_mask": ocean_mask,
         "ocean_mask_lats": mask_lats,
         "ocean_mask_lons": mask_lons,
-        "source": "copernicus" if copernicus_provider._has_copernicusmarine else "synthetic",
+        "source": (
+            "copernicus" if copernicus_provider._has_copernicusmarine else "synthetic"
+        ),
         "colorscale": {
             "min": 0,
             "max": 6,
@@ -3335,18 +3863,36 @@ async def api_get_wave_field(
         response["direction"] = wave_data.wave_direction.tolist()
 
     # Include wave decomposition when available
-    has_decomp = wave_data.windwave_height is not None and wave_data.swell_height is not None
+    has_decomp = (
+        wave_data.windwave_height is not None and wave_data.swell_height is not None
+    )
     response["has_decomposition"] = has_decomp
     if has_decomp:
         response["windwave"] = {
             "height": wave_data.windwave_height.tolist(),
-            "period": wave_data.windwave_period.tolist() if wave_data.windwave_period is not None else None,
-            "direction": wave_data.windwave_direction.tolist() if wave_data.windwave_direction is not None else None,
+            "period": (
+                wave_data.windwave_period.tolist()
+                if wave_data.windwave_period is not None
+                else None
+            ),
+            "direction": (
+                wave_data.windwave_direction.tolist()
+                if wave_data.windwave_direction is not None
+                else None
+            ),
         }
         response["swell"] = {
             "height": wave_data.swell_height.tolist(),
-            "period": wave_data.swell_period.tolist() if wave_data.swell_period is not None else None,
-            "direction": wave_data.swell_direction.tolist() if wave_data.swell_direction is not None else None,
+            "period": (
+                wave_data.swell_period.tolist()
+                if wave_data.swell_period is not None
+                else None
+            ),
+            "direction": (
+                wave_data.swell_direction.tolist()
+                if wave_data.swell_direction is not None
+                else None
+            ),
         }
 
     return response
@@ -3386,10 +3932,20 @@ async def api_get_current_field(
         "ny": len(current_data.lats),
         "lats": current_data.lats.tolist(),
         "lons": current_data.lons.tolist(),
-        "u": current_data.u_component.tolist() if current_data.u_component is not None else [],
-        "v": current_data.v_component.tolist() if current_data.v_component is not None else [],
+        "u": (
+            current_data.u_component.tolist()
+            if current_data.u_component is not None
+            else []
+        ),
+        "v": (
+            current_data.v_component.tolist()
+            if current_data.v_component is not None
+            else []
+        ),
         "unit": "m/s",
-        "source": "copernicus" if copernicus_provider._has_copernicusmarine else "synthetic",
+        "source": (
+            "copernicus" if copernicus_provider._has_copernicusmarine else "synthetic"
+        ),
     }
 
 
@@ -3415,7 +3971,9 @@ async def api_get_current_velocity_format(
     if db_only:
         if db_weather is None:
             return Response(status_code=204)
-        current_data = db_weather.get_current_from_db(lat_min, lat_max, lon_min, lon_max)
+        current_data = db_weather.get_current_from_db(
+            lat_min, lat_max, lon_min, lon_max
+        )
         if current_data is None:
             return Response(status_code=204)
     else:
@@ -3423,15 +3981,25 @@ async def api_get_current_velocity_format(
 
     # Apply ocean mask — zero out land so particles don't render there
     u_masked, v_masked = _apply_ocean_mask_velocity(
-        current_data.u_component, current_data.v_component,
-        current_data.lats, current_data.lons,
+        current_data.u_component,
+        current_data.v_component,
+        current_data.lats,
+        current_data.lons,
     )
 
     # Derive header from actual data arrays (native resolution may differ from request)
     actual_lats = current_data.lats
     actual_lons = current_data.lons
-    actual_dx = abs(float(actual_lons[1] - actual_lons[0])) if len(actual_lons) > 1 else resolution
-    actual_dy = abs(float(actual_lats[1] - actual_lats[0])) if len(actual_lats) > 1 else resolution
+    actual_dx = (
+        abs(float(actual_lons[1] - actual_lons[0]))
+        if len(actual_lons) > 1
+        else resolution
+    )
+    actual_dy = (
+        abs(float(actual_lats[1] - actual_lats[0]))
+        if len(actual_lats) > 1
+        else resolution
+    )
 
     # leaflet-velocity expects data ordered N→S, W→E
     if len(actual_lats) > 1 and actual_lats[1] > actual_lats[0]:
@@ -3488,25 +4056,26 @@ async def api_get_weather_point(
         "position": {"lat": lat, "lon": lon},
         "time": time.isoformat(),
         "wind": {
-            "speed_ms": wx['wind_speed_ms'],
-            "speed_kts": wx['wind_speed_ms'] * 1.94384,
-            "dir_deg": wx['wind_dir_deg'],
+            "speed_ms": wx["wind_speed_ms"],
+            "speed_kts": wx["wind_speed_ms"] * 1.94384,
+            "dir_deg": wx["wind_dir_deg"],
         },
         "waves": {
-            "height_m": wx['sig_wave_height_m'],
-            "dir_deg": wx['wave_dir_deg'],
+            "height_m": wx["sig_wave_height_m"],
+            "dir_deg": wx["wave_dir_deg"],
         },
         "current": {
-            "speed_ms": wx['current_speed_ms'],
-            "speed_kts": wx['current_speed_ms'] * 1.94384,
-            "dir_deg": wx['current_dir_deg'],
-        }
+            "speed_ms": wx["current_speed_ms"],
+            "speed_kts": wx["current_speed_ms"] * 1.94384,
+            "dir_deg": wx["current_dir_deg"],
+        },
     }
 
 
 # ============================================================================
 # API Endpoints - Extended Weather Fields (SPEC-P1)
 # ============================================================================
+
 
 @app.get("/api/weather/sst")
 async def api_get_sst_field(
@@ -3528,7 +4097,9 @@ async def api_get_sst_field(
 
     sst_data = get_sst_field(lat_min, lat_max, lon_min, lon_max, resolution, time)
 
-    mask_lats, mask_lons, ocean_mask = _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05)
+    mask_lats, mask_lons, ocean_mask = _build_ocean_mask(
+        lat_min, lat_max, lon_min, lon_max, step=0.05
+    )
 
     return {
         "parameter": "sst",
@@ -3549,11 +4120,20 @@ async def api_get_sst_field(
         "ocean_mask": ocean_mask,
         "ocean_mask_lats": mask_lats,
         "ocean_mask_lons": mask_lons,
-        "source": "copernicus" if copernicus_provider._has_copernicusmarine else "synthetic",
+        "source": (
+            "copernicus" if copernicus_provider._has_copernicusmarine else "synthetic"
+        ),
         "colorscale": {
             "min": -2,
             "max": 32,
-            "colors": ["#0000ff", "#00ccff", "#00ff88", "#ffff00", "#ff8800", "#ff0000"],
+            "colors": [
+                "#0000ff",
+                "#00ccff",
+                "#00ff88",
+                "#ffff00",
+                "#ff8800",
+                "#ff0000",
+            ],
         },
     }
 
@@ -3576,9 +4156,13 @@ async def api_get_visibility_field(
     if time is None:
         time = datetime.utcnow()
 
-    vis_data = get_visibility_field(lat_min, lat_max, lon_min, lon_max, resolution, time)
+    vis_data = get_visibility_field(
+        lat_min, lat_max, lon_min, lon_max, resolution, time
+    )
 
-    mask_lats, mask_lons, ocean_mask = _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05)
+    mask_lats, mask_lons, ocean_mask = _build_ocean_mask(
+        lat_min, lat_max, lon_min, lon_max, step=0.05
+    )
 
     return {
         "parameter": "visibility",
@@ -3638,7 +4222,9 @@ async def api_get_ice_field(
     else:
         ice_data = get_ice_field(lat_min, lat_max, lon_min, lon_max, resolution, time)
 
-    mask_lats, mask_lons, ocean_mask = _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05)
+    mask_lats, mask_lons, ocean_mask = _build_ocean_mask(
+        lat_min, lat_max, lon_min, lon_max, step=0.05
+    )
 
     return {
         "parameter": "ice_concentration",
@@ -3659,7 +4245,9 @@ async def api_get_ice_field(
         "ocean_mask": ocean_mask,
         "ocean_mask_lats": mask_lats,
         "ocean_mask_lons": mask_lons,
-        "source": "copernicus" if copernicus_provider._has_copernicusmarine else "synthetic",
+        "source": (
+            "copernicus" if copernicus_provider._has_copernicusmarine else "synthetic"
+        ),
         "colorscale": {
             "min": 0,
             "max": 1,
@@ -3688,16 +4276,36 @@ async def api_get_swell_field(
 
     wave_data = get_wave_field(lat_min, lat_max, lon_min, lon_max, resolution)
 
-    mask_lats, mask_lons, ocean_mask = _build_ocean_mask(lat_min, lat_max, lon_min, lon_max, step=0.05)
+    mask_lats, mask_lons, ocean_mask = _build_ocean_mask(
+        lat_min, lat_max, lon_min, lon_max, step=0.05
+    )
 
     # Build swell decomposition response
     has_decomposition = wave_data.swell_height is not None
     swell_hs = wave_data.swell_height.tolist() if has_decomposition else None
-    swell_tp = wave_data.swell_period.tolist() if wave_data.swell_period is not None else None
-    swell_dir = wave_data.swell_direction.tolist() if wave_data.swell_direction is not None else None
-    windsea_hs = wave_data.windwave_height.tolist() if wave_data.windwave_height is not None else None
-    windsea_tp = wave_data.windwave_period.tolist() if wave_data.windwave_period is not None else None
-    windsea_dir = wave_data.windwave_direction.tolist() if wave_data.windwave_direction is not None else None
+    swell_tp = (
+        wave_data.swell_period.tolist() if wave_data.swell_period is not None else None
+    )
+    swell_dir = (
+        wave_data.swell_direction.tolist()
+        if wave_data.swell_direction is not None
+        else None
+    )
+    windsea_hs = (
+        wave_data.windwave_height.tolist()
+        if wave_data.windwave_height is not None
+        else None
+    )
+    windsea_tp = (
+        wave_data.windwave_period.tolist()
+        if wave_data.windwave_period is not None
+        else None
+    )
+    windsea_dir = (
+        wave_data.windwave_direction.tolist()
+        if wave_data.windwave_direction is not None
+        else None
+    )
 
     return {
         "parameter": "swell",
@@ -3734,6 +4342,7 @@ async def api_get_swell_field(
 # API Endpoints - Routes (Layer 2)
 # ============================================================================
 
+
 @app.post("/api/routes/parse-rtz")
 @limiter.limit(get_rate_limit_string())
 async def parse_rtz(
@@ -3753,13 +4362,13 @@ async def parse_rtz(
         if len(content) > MAX_RTZ_SIZE_BYTES:
             raise HTTPException(
                 status_code=413,
-                detail=f"File too large. Maximum size: {MAX_RTZ_SIZE_BYTES // (1024*1024)} MB"
+                detail=f"File too large. Maximum size: {MAX_RTZ_SIZE_BYTES // (1024*1024)} MB",
             )
 
         if len(content) == 0:
             raise HTTPException(status_code=400, detail="Empty file")
 
-        rtz_string = content.decode('utf-8')
+        rtz_string = content.decode("utf-8")
 
         route = parse_rtz_string(rtz_string)
 
@@ -3783,7 +4392,7 @@ async def parse_rtz(
                     "bearing_deg": leg.bearing_deg,
                 }
                 for leg in route.legs
-            ]
+            ],
         }
     except Exception as e:
         logger.error(f"Failed to parse RTZ: {e}")
@@ -3826,13 +4435,14 @@ async def create_route_from_wps(
                 "bearing_deg": leg.bearing_deg,
             }
             for leg in route.legs
-        ]
+        ],
     }
 
 
 # ============================================================================
 # API Endpoints - Voyage Calculation (Layer 3)
 # ============================================================================
+
 
 @app.post("/api/voyage/calculate", response_model=VoyageResponse)
 async def calculate_voyage(request: VoyageRequest):
@@ -3856,7 +4466,9 @@ async def calculate_voyage(request: VoyageRequest):
 
     departure = request.departure_time or datetime.utcnow()
     t_start = _time.monotonic()
-    logger.info(f"Voyage calculation started: {len(request.waypoints)} waypoints, speed={request.calm_speed_kts}kts, weather={request.use_weather}")
+    logger.info(
+        f"Voyage calculation started: {len(request.waypoints)} waypoints, speed={request.calm_speed_kts}kts, weather={request.use_weather}"
+    )
 
     # Create route from waypoints
     wps = [(wp.lat, wp.lon) for wp in request.waypoints]
@@ -3893,7 +4505,10 @@ async def calculate_voyage(request: VoyageRequest):
                     departure_time=departure,
                     calm_speed_kts=request.calm_speed_kts,
                 )
-                avail_parts = [f"{s}: {v.get('coverage_pct',0):.0f}%" for s, v in wx_needs.availability.items()]
+                avail_parts = [
+                    f"{s}: {v.get('coverage_pct',0):.0f}%"
+                    for s, v in wx_needs.availability.items()
+                ]
                 logger.info(
                     f"Voyage weather assessment: {wx_needs.estimated_passage_hours:.0f}h passage, "
                     f"need hours {wx_needs.required_forecast_hours[:5]}..., "
@@ -3903,9 +4518,13 @@ async def calculate_voyage(request: VoyageRequest):
                 if temporal_wx is not None:
                     used_temporal = True
                     params_loaded = list(temporal_wx.grids.keys())
-                    has_temporal_wind = any(p in temporal_wx.grids for p in ["wind_u", "wind_v"])
+                    has_temporal_wind = any(
+                        p in temporal_wx.grids for p in ["wind_u", "wind_v"]
+                    )
                     if not has_temporal_wind:
-                        if _supplement_temporal_wind(temporal_wx, lat_min, lat_max, lon_min, lon_max, departure):
+                        if _supplement_temporal_wind(
+                            temporal_wx, lat_min, lat_max, lon_min, lon_max, departure
+                        ):
                             has_temporal_wind = True
                             params_loaded = list(temporal_wx.grids.keys())
                     logger.info(
@@ -3913,15 +4532,22 @@ async def calculate_voyage(request: VoyageRequest):
                         f"wind={'yes' if has_temporal_wind else 'NO (calm assumed)'}"
                     )
                 else:
-                    logger.warning("Temporal provisioning returned None — falling back to single-snapshot")
+                    logger.warning(
+                        "Temporal provisioning returned None — falling back to single-snapshot"
+                    )
             except Exception as e:
-                logger.warning(f"Temporal weather provisioning failed for voyage, falling back: {e}", exc_info=True)
+                logger.warning(
+                    f"Temporal weather provisioning failed for voyage, falling back: {e}",
+                    exc_info=True,
+                )
 
         # ── Fallback: single-snapshot GridWeatherProvider ─────────────
         grid_wx = None
         if temporal_wx is None:
             t0 = _time.monotonic()
-            logger.info(f"  Pre-fetching single-snapshot weather for bbox [{lat_min:.1f},{lat_max:.1f},{lon_min:.1f},{lon_max:.1f}]")
+            logger.info(
+                f"  Pre-fetching single-snapshot weather for bbox [{lat_min:.1f},{lat_max:.1f},{lon_min:.1f},{lon_max:.1f}]"
+            )
             wind = get_wind_field(lat_min, lat_max, lon_min, lon_max, 0.5, departure)
             logger.info(f"  Wind loaded in {_time.monotonic()-t0:.1f}s")
             t1 = _time.monotonic()
@@ -3932,9 +4558,13 @@ async def calculate_voyage(request: VoyageRequest):
             logger.info(f"  Currents loaded in {_time.monotonic()-t2:.1f}s")
             # Extended fields (SPEC-P1)
             sst = get_sst_field(lat_min, lat_max, lon_min, lon_max, 0.5, departure)
-            vis = get_visibility_field(lat_min, lat_max, lon_min, lon_max, 0.5, departure)
+            vis = get_visibility_field(
+                lat_min, lat_max, lon_min, lon_max, 0.5, departure
+            )
             ice = get_ice_field(lat_min, lat_max, lon_min, lon_max, 0.5, departure)
-            logger.info(f"  Total prefetch: {_time.monotonic()-t0:.1f}s (incl. SST/vis/ice)")
+            logger.info(
+                f"  Total prefetch: {_time.monotonic()-t0:.1f}s (incl. SST/vis/ice)"
+            )
             grid_wx = GridWeatherProvider(wind, waves, currents, sst, vis, ice)
 
         data_source_type = "temporal" if used_temporal else "forecast"
@@ -3942,13 +4572,17 @@ async def calculate_voyage(request: VoyageRequest):
 
         # Wrapper that tracks data sources per leg
         def tracked_weather_provider(lat: float, lon: float, time: datetime):
-            global _voyage_data_sources
             leg_wx = wx_callable(lat, lon, time)
-            _voyage_data_sources.append({
-                'lat': lat, 'lon': lon, 'time': time.isoformat(),
-                'source': data_source_type, 'forecast_weight': 1.0,
-                'message': f'{"Temporal" if used_temporal else "Single-snapshot"} grid',
-            })
+            _voyage_data_sources.append(
+                {
+                    "lat": lat,
+                    "lon": lon,
+                    "time": time.isoformat(),
+                    "source": data_source_type,
+                    "forecast_weight": 1.0,
+                    "message": f'{"Temporal" if used_temporal else "Single-snapshot"} grid',
+                }
+            )
             return leg_wx
 
         wp_func = tracked_weather_provider
@@ -3960,12 +4594,16 @@ async def calculate_voyage(request: VoyageRequest):
         departure_time=departure,
         weather_provider=wp_func,
     )
-    logger.info(f"Voyage calculation completed in {_time.monotonic()-t_start:.1f}s: {len(result.legs)} legs, {result.total_distance_nm:.0f}nm, {result.total_fuel_mt:.1f}mt fuel")
+    logger.info(
+        f"Voyage calculation completed in {_time.monotonic()-t_start:.1f}s: {len(result.legs)} legs, {result.total_distance_nm:.0f}nm, {result.total_fuel_mt:.1f}mt fuel"
+    )
 
     # Build data source summary
-    forecast_legs = sum(1 for ds in _voyage_data_sources if ds['source'] == 'forecast')
-    blended_legs = sum(1 for ds in _voyage_data_sources if ds['source'] == 'blended')
-    climatology_legs = sum(1 for ds in _voyage_data_sources if ds['source'] == 'climatology')
+    forecast_legs = sum(1 for ds in _voyage_data_sources if ds["source"] == "forecast")
+    blended_legs = sum(1 for ds in _voyage_data_sources if ds["source"] == "blended")
+    climatology_legs = sum(
+        1 for ds in _voyage_data_sources if ds["source"] == "climatology"
+    )
 
     data_source_warning = None
     if climatology_legs > 0:
@@ -3979,13 +4617,17 @@ async def calculate_voyage(request: VoyageRequest):
             f"{blended_legs} leg(s) use blended forecast/climatology data."
         )
 
-    data_sources_summary = DataSourceSummary(
-        forecast_legs=forecast_legs,
-        blended_legs=blended_legs,
-        climatology_legs=climatology_legs,
-        forecast_horizon_days=ClimatologyProvider.FORECAST_HORIZON_DAYS,
-        warning=data_source_warning,
-    ) if request.use_weather else None
+    data_sources_summary = (
+        DataSourceSummary(
+            forecast_legs=forecast_legs,
+            blended_legs=blended_legs,
+            climatology_legs=climatology_legs,
+            forecast_horizon_days=ClimatologyProvider.FORECAST_HORIZON_DAYS,
+            warning=data_source_warning,
+        )
+        if request.use_weather
+        else None
+    )
 
     # Format response with data source info per leg
     legs_response = []
@@ -3993,40 +4635,42 @@ async def calculate_voyage(request: VoyageRequest):
         # Get data source info for this leg
         leg_source = _voyage_data_sources[i] if i < len(_voyage_data_sources) else None
 
-        legs_response.append(LegResultModel(
-            leg_index=leg.leg_index,
-            from_wp=WaypointModel(
-                id=leg.from_wp.id,
-                name=leg.from_wp.name,
-                lat=leg.from_wp.lat,
-                lon=leg.from_wp.lon,
-            ),
-            to_wp=WaypointModel(
-                id=leg.to_wp.id,
-                name=leg.to_wp.name,
-                lat=leg.to_wp.lat,
-                lon=leg.to_wp.lon,
-            ),
-            distance_nm=round(leg.distance_nm, 2),
-            bearing_deg=round(leg.bearing_deg, 1),
-            wind_speed_kts=round(leg.weather.wind_speed_ms * 1.94384, 1),
-            wind_dir_deg=round(leg.weather.wind_dir_deg, 0),
-            wave_height_m=round(leg.weather.sig_wave_height_m, 1),
-            wave_dir_deg=round(leg.weather.wave_dir_deg, 0),
-            current_speed_ms=round(leg.weather.current_speed_ms, 2),
-            current_dir_deg=round(leg.weather.current_dir_deg, 0),
-            calm_speed_kts=round(leg.calm_speed_kts, 1),
-            stw_kts=round(leg.stw_kts, 1),
-            sog_kts=round(leg.sog_kts, 1),
-            speed_loss_pct=round(leg.speed_loss_pct, 1),
-            time_hours=round(leg.time_hours, 2),
-            departure_time=leg.departure_time,
-            arrival_time=leg.arrival_time,
-            fuel_mt=round(leg.fuel_mt, 2),
-            power_kw=round(leg.power_kw, 0),
-            data_source=leg_source['source'] if leg_source else None,
-            forecast_weight=leg_source['forecast_weight'] if leg_source else None,
-        ))
+        legs_response.append(
+            LegResultModel(
+                leg_index=leg.leg_index,
+                from_wp=WaypointModel(
+                    id=leg.from_wp.id,
+                    name=leg.from_wp.name,
+                    lat=leg.from_wp.lat,
+                    lon=leg.from_wp.lon,
+                ),
+                to_wp=WaypointModel(
+                    id=leg.to_wp.id,
+                    name=leg.to_wp.name,
+                    lat=leg.to_wp.lat,
+                    lon=leg.to_wp.lon,
+                ),
+                distance_nm=round(leg.distance_nm, 2),
+                bearing_deg=round(leg.bearing_deg, 1),
+                wind_speed_kts=round(leg.weather.wind_speed_ms * 1.94384, 1),
+                wind_dir_deg=round(leg.weather.wind_dir_deg, 0),
+                wave_height_m=round(leg.weather.sig_wave_height_m, 1),
+                wave_dir_deg=round(leg.weather.wave_dir_deg, 0),
+                current_speed_ms=round(leg.weather.current_speed_ms, 2),
+                current_dir_deg=round(leg.weather.current_dir_deg, 0),
+                calm_speed_kts=round(leg.calm_speed_kts, 1),
+                stw_kts=round(leg.stw_kts, 1),
+                sog_kts=round(leg.sog_kts, 1),
+                speed_loss_pct=round(leg.speed_loss_pct, 1),
+                time_hours=round(leg.time_hours, 2),
+                departure_time=leg.departure_time,
+                arrival_time=leg.arrival_time,
+                fuel_mt=round(leg.fuel_mt, 2),
+                power_kw=round(leg.power_kw, 0),
+                data_source=leg_source["source"] if leg_source else None,
+                forecast_weight=leg_source["forecast_weight"] if leg_source else None,
+            )
+        )
 
     return VoyageResponse(
         route_name=result.route_name,
@@ -4044,8 +4688,11 @@ async def calculate_voyage(request: VoyageRequest):
     )
 
 
-@app.post("/api/voyage/monte-carlo", response_model=MonteCarloResponse,
-           dependencies=[Depends(require_not_demo("Monte Carlo simulation"))])
+@app.post(
+    "/api/voyage/monte-carlo",
+    response_model=MonteCarloResponse,
+    dependencies=[Depends(require_not_demo("Monte Carlo simulation"))],
+)
 async def monte_carlo_simulation(request: MonteCarloRequest):
     """
     Run Monte Carlo simulation on a voyage.
@@ -4070,18 +4717,25 @@ async def monte_carlo_simulation(request: MonteCarloRequest):
         lats = [wp.lat for wp in request.waypoints]
         lons = [wp.lon for wp in request.waypoints]
         margin = 2.0
-        bbox = (min(lats) - margin, max(lats) + margin,
-                min(lons) - margin, max(lons) + margin)
+        bbox = (
+            min(lats) - margin,
+            max(lats) + margin,
+            min(lons) - margin,
+            max(lons) + margin,
+        )
         wind_data = get_wind_field(*bbox, 0.5, departure)
         wave_data = get_wave_field(*bbox, 0.5, wind_data)
         current_data = get_current_field(bbox[0], bbox[1], bbox[2], bbox[3])
         if wind_data and wave_data and current_data:
             from src.optimization.grid_weather_provider import GridWeatherProvider
+
             grid_wx = GridWeatherProvider(wind_data, wave_data, current_data)
             mc_weather_fn = grid_wx.get_weather
             logger.info("MC: Pre-fetched route weather grid for fast wind lookups")
     except Exception as e:
-        logger.warning(f"MC: Failed to pre-fetch route grid, using default provider: {e}")
+        logger.warning(
+            f"MC: Failed to pre-fetch route grid, using default provider: {e}"
+        )
 
     def _run():
         return monte_carlo_sim.run(
@@ -4125,9 +4779,13 @@ async def monte_carlo_simulation(request: MonteCarloRequest):
 
 @app.get("/api/voyage/weather-along-route")
 async def get_weather_along_route(
-    waypoints: str = Query(..., description="Comma-separated lat,lon pairs: lat1,lon1;lat2,lon2;..."),
+    waypoints: str = Query(
+        ..., description="Comma-separated lat,lon pairs: lat1,lon1;lat2,lon2;..."
+    ),
     time: Optional[datetime] = None,
-    interpolation_points: int = Query(5, ge=1, le=20, description="Points to interpolate per leg"),
+    interpolation_points: int = Query(
+        5, ge=1, le=20, description="Points to interpolate per leg"
+    ),
 ):
     """
     Get weather conditions along a route with distance-indexed interpolation.
@@ -4141,8 +4799,8 @@ async def get_weather_along_route(
     # Parse waypoints
     try:
         wps = []
-        for wp_str in waypoints.split(';'):
-            lat, lon = wp_str.strip().split(',')
+        for wp_str in waypoints.split(";"):
+            lat, lon = wp_str.strip().split(",")
             wps.append((float(lat), float(lon)))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid waypoints format: {e}")
@@ -4170,46 +4828,53 @@ async def get_weather_along_route(
                 seg_dist = haversine_distance(
                     prev_lat if j == 1 else points[-1]["lat"],
                     prev_lon if j == 1 else points[-1]["lon"],
-                    ilat, ilon,
+                    ilat,
+                    ilon,
                 )
                 cumulative_nm += seg_dist
 
                 wx, _ = get_weather_at_point(ilat, ilon, time)
-                points.append({
-                    "distance_nm": round(cumulative_nm, 1),
-                    "lat": round(ilat, 4),
-                    "lon": round(ilon, 4),
-                    "wind_speed_kts": round(wx['wind_speed_ms'] * 1.94384, 1),
-                    "wind_dir_deg": round(wx['wind_dir_deg'], 0),
-                    "wave_height_m": round(wx['sig_wave_height_m'], 1),
-                    "wave_dir_deg": round(wx['wave_dir_deg'], 0),
-                    "current_speed_ms": round(wx['current_speed_ms'], 2),
-                    "current_dir_deg": round(wx['current_dir_deg'], 0),
-                    "is_waypoint": False,
-                    "waypoint_index": None,
-                })
+                points.append(
+                    {
+                        "distance_nm": round(cumulative_nm, 1),
+                        "lat": round(ilat, 4),
+                        "lon": round(ilon, 4),
+                        "wind_speed_kts": round(wx["wind_speed_ms"] * 1.94384, 1),
+                        "wind_dir_deg": round(wx["wind_dir_deg"], 0),
+                        "wave_height_m": round(wx["sig_wave_height_m"], 1),
+                        "wave_dir_deg": round(wx["wave_dir_deg"], 0),
+                        "current_speed_ms": round(wx["current_speed_ms"], 2),
+                        "current_dir_deg": round(wx["current_dir_deg"], 0),
+                        "is_waypoint": False,
+                        "waypoint_index": None,
+                    }
+                )
 
             # Distance from last interpolated point to this waypoint
             if points:
-                seg_dist = haversine_distance(points[-1]["lat"], points[-1]["lon"], lat, lon)
+                seg_dist = haversine_distance(
+                    points[-1]["lat"], points[-1]["lon"], lat, lon
+                )
                 cumulative_nm += seg_dist
             # else first waypoint at distance 0
 
         # Add waypoint itself
         wx, _ = get_weather_at_point(lat, lon, time)
-        points.append({
-            "distance_nm": round(cumulative_nm, 1),
-            "lat": round(lat, 4),
-            "lon": round(lon, 4),
-            "wind_speed_kts": round(wx['wind_speed_ms'] * 1.94384, 1),
-            "wind_dir_deg": round(wx['wind_dir_deg'], 0),
-            "wave_height_m": round(wx['sig_wave_height_m'], 1),
-            "wave_dir_deg": round(wx['wave_dir_deg'], 0),
-            "current_speed_ms": round(wx['current_speed_ms'], 2),
-            "current_dir_deg": round(wx['current_dir_deg'], 0),
-            "is_waypoint": True,
-            "waypoint_index": i,
-        })
+        points.append(
+            {
+                "distance_nm": round(cumulative_nm, 1),
+                "lat": round(lat, 4),
+                "lon": round(lon, 4),
+                "wind_speed_kts": round(wx["wind_speed_ms"] * 1.94384, 1),
+                "wind_dir_deg": round(wx["wind_dir_deg"], 0),
+                "wave_height_m": round(wx["sig_wave_height_m"], 1),
+                "wave_dir_deg": round(wx["wave_dir_deg"], 0),
+                "current_speed_ms": round(wx["current_speed_ms"], 2),
+                "current_dir_deg": round(wx["current_dir_deg"], 0),
+                "is_waypoint": True,
+                "waypoint_index": i,
+            }
+        )
 
     return {
         "time": time.isoformat(),
@@ -4222,8 +4887,12 @@ async def get_weather_along_route(
 # API Endpoints - Route Optimization (Layer 4)
 # ============================================================================
 
-@app.post("/api/optimize/route", response_model=OptimizationResponse,
-           dependencies=[Depends(require_not_demo("Route optimization"))])
+
+@app.post(
+    "/api/optimize/route",
+    response_model=OptimizationResponse,
+    dependencies=[Depends(require_not_demo("Route optimization"))],
+)
 async def optimize_route(request: OptimizationRequest):
     """
     Find optimal route through weather.
@@ -4248,8 +4917,6 @@ async def optimize_route(request: OptimizationRequest):
 
 def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationResponse":
     """Synchronous route optimization logic (runs in a thread pool)."""
-    global route_optimizer, visir_optimizer
-
     departure = request.departure_time or datetime.utcnow()
 
     # Select optimization engine
@@ -4261,7 +4928,8 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
     # VISIR uses coarser resolution than A* (0.25° vs 0.1°) for performance;
     # at 0.25° the edge land checks keep routes off land reliably.
     active_optimizer.resolution_deg = (
-        max(request.grid_resolution_deg, 0.25) if engine_name == "visir"
+        max(request.grid_resolution_deg, 0.25)
+        if engine_name == "visir"
         else request.grid_resolution_deg
     )
     active_optimizer.optimization_target = request.optimization_target
@@ -4282,7 +4950,10 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
                     departure_time=departure,
                     calm_speed_kts=request.calm_speed_kts,
                 )
-                avail_parts = [f"{s}: {v.get('coverage_pct',0):.0f}%" for s,v in wx_needs.availability.items()]
+                avail_parts = [
+                    f"{s}: {v.get('coverage_pct',0):.0f}%"
+                    for s, v in wx_needs.availability.items()
+                ]
                 logger.info(
                     f"Weather assessment: {wx_needs.estimated_passage_hours:.0f}h passage, "
                     f"need hours {wx_needs.required_forecast_hours[:5]}..., "
@@ -4295,13 +4966,20 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
                 if temporal_wx is not None:
                     used_temporal = True
                     params_loaded = list(temporal_wx.grids.keys())
-                    has_temporal_wind = any(p in temporal_wx.grids for p in ["wind_u", "wind_v"])
+                    has_temporal_wind = any(
+                        p in temporal_wx.grids for p in ["wind_u", "wind_v"]
+                    )
                     if not has_temporal_wind:
                         bbox = wx_needs.corridor_bbox
-                        if _supplement_temporal_wind(temporal_wx, bbox[0], bbox[1], bbox[2], bbox[3], departure):
+                        if _supplement_temporal_wind(
+                            temporal_wx, bbox[0], bbox[1], bbox[2], bbox[3], departure
+                        ):
                             has_temporal_wind = True
                             params_loaded = list(temporal_wx.grids.keys())
-                    hours_per_param = {p: sorted(temporal_wx.grids[p].keys()) for p in params_loaded[:3]}
+                    hours_per_param = {
+                        p: sorted(temporal_wx.grids[p].keys())
+                        for p in params_loaded[:3]
+                    }
                     logger.info(
                         f"Temporal provider: {len(params_loaded)} params ({params_loaded}), "
                         f"wind={'yes' if has_temporal_wind else 'NO (calm assumed)'}, "
@@ -4316,15 +4994,23 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
                         )
                         for p in temporal_wx.provenance.values()
                     ]
-                    logger.info("Using temporal weather provider for route optimization")
+                    logger.info(
+                        "Using temporal weather provider for route optimization"
+                    )
                 else:
-                    logger.warning("Temporal provisioning returned None — falling back to single-snapshot")
+                    logger.warning(
+                        "Temporal provisioning returned None — falling back to single-snapshot"
+                    )
             except Exception as e:
-                logger.warning(f"Temporal weather provisioning failed, falling back: {e}", exc_info=True)
+                logger.warning(
+                    f"Temporal weather provisioning failed, falling back: {e}",
+                    exc_info=True,
+                )
 
         # ── Fallback: single-snapshot GridWeatherProvider ─────────────
         if temporal_wx is None:
             import time as _time
+
             margin = 5.0
             lat_min = min(request.origin.lat, request.destination.lat) - margin
             lat_max = max(request.origin.lat, request.destination.lat) + margin
@@ -4332,21 +5018,59 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
             lon_max = max(request.origin.lon, request.destination.lon) + margin
             lat_min, lat_max = max(lat_min, -85), min(lat_max, 85)
 
-            logger.info(f"Fallback: loading single-snapshot weather for bbox [{lat_min:.1f},{lat_max:.1f},{lon_min:.1f},{lon_max:.1f}]")
+            logger.info(
+                f"Fallback: loading single-snapshot weather for bbox [{lat_min:.1f},{lat_max:.1f},{lon_min:.1f},{lon_max:.1f}]"
+            )
             t0 = _time.monotonic()
-            wind = get_wind_field(lat_min, lat_max, lon_min, lon_max, request.grid_resolution_deg, departure)
-            logger.info(f"  Wind loaded in {_time.monotonic()-t0:.1f}s: source={getattr(wind, 'source', '?')}")
+            wind = get_wind_field(
+                lat_min,
+                lat_max,
+                lon_min,
+                lon_max,
+                request.grid_resolution_deg,
+                departure,
+            )
+            logger.info(
+                f"  Wind loaded in {_time.monotonic()-t0:.1f}s: source={getattr(wind, 'source', '?')}"
+            )
             t1 = _time.monotonic()
-            waves = get_wave_field(lat_min, lat_max, lon_min, lon_max, request.grid_resolution_deg, wind)
+            waves = get_wave_field(
+                lat_min, lat_max, lon_min, lon_max, request.grid_resolution_deg, wind
+            )
             logger.info(f"  Waves loaded in {_time.monotonic()-t1:.1f}s")
             t2 = _time.monotonic()
-            currents = get_current_field(lat_min, lat_max, lon_min, lon_max, request.grid_resolution_deg)
+            currents = get_current_field(
+                lat_min, lat_max, lon_min, lon_max, request.grid_resolution_deg
+            )
             logger.info(f"  Currents loaded in {_time.monotonic()-t2:.1f}s")
             # Extended fields (SPEC-P1)
-            sst = get_sst_field(lat_min, lat_max, lon_min, lon_max, request.grid_resolution_deg, departure)
-            vis = get_visibility_field(lat_min, lat_max, lon_min, lon_max, request.grid_resolution_deg, departure)
-            ice = get_ice_field(lat_min, lat_max, lon_min, lon_max, request.grid_resolution_deg, departure)
-            logger.info(f"  Total fallback: {_time.monotonic()-t0:.1f}s (incl. SST/vis/ice)")
+            sst = get_sst_field(
+                lat_min,
+                lat_max,
+                lon_min,
+                lon_max,
+                request.grid_resolution_deg,
+                departure,
+            )
+            vis = get_visibility_field(
+                lat_min,
+                lat_max,
+                lon_min,
+                lon_max,
+                request.grid_resolution_deg,
+                departure,
+            )
+            ice = get_ice_field(
+                lat_min,
+                lat_max,
+                lon_min,
+                lon_max,
+                request.grid_resolution_deg,
+                departure,
+            )
+            logger.info(
+                f"  Total fallback: {_time.monotonic()-t0:.1f}s (incl. SST/vis/ice)"
+            )
             grid_wx = GridWeatherProvider(wind, waves, currents, sst, vis, ice)
 
         # Select weather provider callable
@@ -4394,35 +5118,64 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
             data_source_label = None
             if used_temporal and temporal_wx is not None:
                 from datetime import timedelta as _td
-                leg_time = departure + _td(hours=cum_time_h + leg['time_hours'] / 2)
+
+                leg_time = departure + _td(hours=cum_time_h + leg["time_hours"] / 2)
                 prov = temporal_wx.get_provenance(leg_time)
                 data_source_label = f"{prov.source_type} ({prov.confidence} confidence)"
-            cum_time_h += leg['time_hours']
+            cum_time_h += leg["time_hours"]
 
-            legs.append(OptimizationLegModel(
-                from_lat=leg['from'][0],
-                from_lon=leg['from'][1],
-                to_lat=leg['to'][0],
-                to_lon=leg['to'][1],
-                distance_nm=round(leg['distance_nm'], 2),
-                bearing_deg=round(leg['bearing_deg'], 1),
-                fuel_mt=round(leg['fuel_mt'], 3),
-                time_hours=round(leg['time_hours'], 2),
-                sog_kts=round(leg['sog_kts'], 1),
-                stw_kts=round(leg.get('stw_kts', leg['sog_kts']), 1),
-                wind_speed_ms=round(leg['wind_speed_ms'], 1),
-                wave_height_m=round(leg['wave_height_m'], 1),
-                safety_status=leg.get('safety_status'),
-                roll_deg=round(leg['roll_deg'], 1) if leg.get('roll_deg') else None,
-                pitch_deg=round(leg['pitch_deg'], 1) if leg.get('pitch_deg') else None,
-                data_source=data_source_label,
-                swell_hs_m=round(leg['swell_hs_m'], 2) if leg.get('swell_hs_m') is not None else None,
-                windsea_hs_m=round(leg['windsea_hs_m'], 2) if leg.get('windsea_hs_m') is not None else None,
-                current_effect_kts=round(leg['current_effect_kts'], 2) if leg.get('current_effect_kts') is not None else None,
-                visibility_m=round(leg['visibility_m'], 0) if leg.get('visibility_m') is not None else None,
-                sst_celsius=round(leg['sst_celsius'], 1) if leg.get('sst_celsius') is not None else None,
-                ice_concentration=round(leg['ice_concentration'], 3) if leg.get('ice_concentration') is not None else None,
-            ))
+            legs.append(
+                OptimizationLegModel(
+                    from_lat=leg["from"][0],
+                    from_lon=leg["from"][1],
+                    to_lat=leg["to"][0],
+                    to_lon=leg["to"][1],
+                    distance_nm=round(leg["distance_nm"], 2),
+                    bearing_deg=round(leg["bearing_deg"], 1),
+                    fuel_mt=round(leg["fuel_mt"], 3),
+                    time_hours=round(leg["time_hours"], 2),
+                    sog_kts=round(leg["sog_kts"], 1),
+                    stw_kts=round(leg.get("stw_kts", leg["sog_kts"]), 1),
+                    wind_speed_ms=round(leg["wind_speed_ms"], 1),
+                    wave_height_m=round(leg["wave_height_m"], 1),
+                    safety_status=leg.get("safety_status"),
+                    roll_deg=round(leg["roll_deg"], 1) if leg.get("roll_deg") else None,
+                    pitch_deg=(
+                        round(leg["pitch_deg"], 1) if leg.get("pitch_deg") else None
+                    ),
+                    data_source=data_source_label,
+                    swell_hs_m=(
+                        round(leg["swell_hs_m"], 2)
+                        if leg.get("swell_hs_m") is not None
+                        else None
+                    ),
+                    windsea_hs_m=(
+                        round(leg["windsea_hs_m"], 2)
+                        if leg.get("windsea_hs_m") is not None
+                        else None
+                    ),
+                    current_effect_kts=(
+                        round(leg["current_effect_kts"], 2)
+                        if leg.get("current_effect_kts") is not None
+                        else None
+                    ),
+                    visibility_m=(
+                        round(leg["visibility_m"], 0)
+                        if leg.get("visibility_m") is not None
+                        else None
+                    ),
+                    sst_celsius=(
+                        round(leg["sst_celsius"], 1)
+                        if leg.get("sst_celsius") is not None
+                        else None
+                    ),
+                    ice_concentration=(
+                        round(leg["ice_concentration"], 3)
+                        if leg.get("ice_concentration") is not None
+                        else None
+                    ),
+                )
+            )
 
         # Build safety summary
         safety_summary = SafetySummary(
@@ -4438,41 +5191,73 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
         for sc in result.scenarios:
             sc_legs = []
             for leg in sc.leg_details:
-                sc_legs.append(OptimizationLegModel(
-                    from_lat=leg['from'][0],
-                    from_lon=leg['from'][1],
-                    to_lat=leg['to'][0],
-                    to_lon=leg['to'][1],
-                    distance_nm=round(leg['distance_nm'], 2),
-                    bearing_deg=round(leg['bearing_deg'], 1),
-                    fuel_mt=round(leg['fuel_mt'], 3),
-                    time_hours=round(leg['time_hours'], 2),
-                    sog_kts=round(leg['sog_kts'], 1),
-                    stw_kts=round(leg.get('stw_kts', leg['sog_kts']), 1),
-                    wind_speed_ms=round(leg['wind_speed_ms'], 1),
-                    wave_height_m=round(leg['wave_height_m'], 1),
-                    safety_status=leg.get('safety_status'),
-                    roll_deg=round(leg['roll_deg'], 1) if leg.get('roll_deg') else None,
-                    pitch_deg=round(leg['pitch_deg'], 1) if leg.get('pitch_deg') else None,
-                    swell_hs_m=round(leg['swell_hs_m'], 2) if leg.get('swell_hs_m') is not None else None,
-                    windsea_hs_m=round(leg['windsea_hs_m'], 2) if leg.get('windsea_hs_m') is not None else None,
-                    current_effect_kts=round(leg['current_effect_kts'], 2) if leg.get('current_effect_kts') is not None else None,
-                    visibility_m=round(leg['visibility_m'], 0) if leg.get('visibility_m') is not None else None,
-                    sst_celsius=round(leg['sst_celsius'], 1) if leg.get('sst_celsius') is not None else None,
-                    ice_concentration=round(leg['ice_concentration'], 3) if leg.get('ice_concentration') is not None else None,
-                ))
-            scenario_models.append(SpeedScenarioModel(
-                strategy=sc.strategy,
-                label=sc.label,
-                total_fuel_mt=round(sc.total_fuel_mt, 2),
-                total_time_hours=round(sc.total_time_hours, 2),
-                total_distance_nm=round(sc.total_distance_nm, 1),
-                avg_speed_kts=round(sc.avg_speed_kts, 1),
-                speed_profile=[round(s, 1) for s in sc.speed_profile],
-                legs=sc_legs,
-                fuel_savings_pct=round(sc.fuel_savings_pct, 1),
-                time_savings_pct=round(sc.time_savings_pct, 1),
-            ))
+                sc_legs.append(
+                    OptimizationLegModel(
+                        from_lat=leg["from"][0],
+                        from_lon=leg["from"][1],
+                        to_lat=leg["to"][0],
+                        to_lon=leg["to"][1],
+                        distance_nm=round(leg["distance_nm"], 2),
+                        bearing_deg=round(leg["bearing_deg"], 1),
+                        fuel_mt=round(leg["fuel_mt"], 3),
+                        time_hours=round(leg["time_hours"], 2),
+                        sog_kts=round(leg["sog_kts"], 1),
+                        stw_kts=round(leg.get("stw_kts", leg["sog_kts"]), 1),
+                        wind_speed_ms=round(leg["wind_speed_ms"], 1),
+                        wave_height_m=round(leg["wave_height_m"], 1),
+                        safety_status=leg.get("safety_status"),
+                        roll_deg=(
+                            round(leg["roll_deg"], 1) if leg.get("roll_deg") else None
+                        ),
+                        pitch_deg=(
+                            round(leg["pitch_deg"], 1) if leg.get("pitch_deg") else None
+                        ),
+                        swell_hs_m=(
+                            round(leg["swell_hs_m"], 2)
+                            if leg.get("swell_hs_m") is not None
+                            else None
+                        ),
+                        windsea_hs_m=(
+                            round(leg["windsea_hs_m"], 2)
+                            if leg.get("windsea_hs_m") is not None
+                            else None
+                        ),
+                        current_effect_kts=(
+                            round(leg["current_effect_kts"], 2)
+                            if leg.get("current_effect_kts") is not None
+                            else None
+                        ),
+                        visibility_m=(
+                            round(leg["visibility_m"], 0)
+                            if leg.get("visibility_m") is not None
+                            else None
+                        ),
+                        sst_celsius=(
+                            round(leg["sst_celsius"], 1)
+                            if leg.get("sst_celsius") is not None
+                            else None
+                        ),
+                        ice_concentration=(
+                            round(leg["ice_concentration"], 3)
+                            if leg.get("ice_concentration") is not None
+                            else None
+                        ),
+                    )
+                )
+            scenario_models.append(
+                SpeedScenarioModel(
+                    strategy=sc.strategy,
+                    label=sc.label,
+                    total_fuel_mt=round(sc.total_fuel_mt, 2),
+                    total_time_hours=round(sc.total_time_hours, 2),
+                    total_distance_nm=round(sc.total_distance_nm, 1),
+                    avg_speed_kts=round(sc.avg_speed_kts, 1),
+                    speed_profile=[round(s, 1) for s in sc.speed_profile],
+                    legs=sc_legs,
+                    fuel_savings_pct=round(sc.fuel_savings_pct, 1),
+                    time_savings_pct=round(sc.time_savings_pct, 1),
+                )
+            )
 
         return OptimizationResponse(
             waypoints=waypoints,
@@ -4490,9 +5275,19 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
             engine=engine_name,
             safety=safety_summary,
             scenarios=scenario_models,
-            baseline_fuel_mt=round(result.baseline_fuel_mt, 2) if result.baseline_fuel_mt else None,
-            baseline_time_hours=round(result.baseline_time_hours, 2) if result.baseline_time_hours else None,
-            baseline_distance_nm=round(result.baseline_distance_nm, 1) if result.baseline_distance_nm else None,
+            baseline_fuel_mt=(
+                round(result.baseline_fuel_mt, 2) if result.baseline_fuel_mt else None
+            ),
+            baseline_time_hours=(
+                round(result.baseline_time_hours, 2)
+                if result.baseline_time_hours
+                else None
+            ),
+            baseline_distance_nm=(
+                round(result.baseline_distance_nm, 1)
+                if result.baseline_distance_nm
+                else None
+            ),
             weather_provenance=provenance_models,
             temporal_weather=used_temporal,
             optimization_target=request.optimization_target,
@@ -4519,13 +5314,14 @@ async def get_optimization_status():
         "vessel_model": {
             "dwt": current_vessel_specs.dwt,
             "service_speed_laden": current_vessel_specs.service_speed_laden,
-        }
+        },
     }
 
 
 # ============================================================================
 # API Endpoints - Vessel Configuration
 # ============================================================================
+
 
 @app.get("/api/vessel/specs")
 async def get_vessel_specs():
@@ -4561,17 +5357,19 @@ async def update_vessel_specs(
     try:
         # Use thread-safe state management
         vessel_state = get_vessel_state()
-        vessel_state.update_specs({
-            'dwt': config.dwt,
-            'loa': config.loa,
-            'beam': config.beam,
-            'draft_laden': config.draft_laden,
-            'draft_ballast': config.draft_ballast,
-            'mcr_kw': config.mcr_kw,
-            'sfoc_at_mcr': config.sfoc_at_mcr,
-            'service_speed_laden': config.service_speed_laden,
-            'service_speed_ballast': config.service_speed_ballast,
-        })
+        vessel_state.update_specs(
+            {
+                "dwt": config.dwt,
+                "loa": config.loa,
+                "beam": config.beam,
+                "draft_laden": config.draft_laden,
+                "draft_ballast": config.draft_ballast,
+                "mcr_kw": config.mcr_kw,
+                "sfoc_at_mcr": config.sfoc_at_mcr,
+                "service_speed_laden": config.service_speed_laden,
+                "service_speed_ballast": config.service_speed_ballast,
+            }
+        )
 
         # Update legacy globals for backward compatibility
         current_vessel_specs = vessel_state.specs
@@ -4589,11 +5387,10 @@ async def update_vessel_specs(
 # API Endpoints - Vessel Calibration
 # ============================================================================
 
+
 @app.get("/api/vessel/calibration")
 async def get_calibration():
     """Get current vessel calibration factors."""
-    global current_calibration
-
     if current_calibration is None:
         return {
             "calibrated": False,
@@ -4603,7 +5400,7 @@ async def get_calibration():
                 "waves": 1.0,
                 "sfoc_factor": 1.0,
             },
-            "message": "No calibration data. Using default theoretical model."
+            "message": "No calibration data. Using default theoretical model.",
         }
 
     return {
@@ -4614,7 +5411,11 @@ async def get_calibration():
             "waves": current_calibration.waves,
             "sfoc_factor": current_calibration.sfoc_factor,
         },
-        "calibrated_at": current_calibration.calibrated_at.isoformat() if current_calibration.calibrated_at else None,
+        "calibrated_at": (
+            current_calibration.calibrated_at.isoformat()
+            if current_calibration.calibrated_at
+            else None
+        ),
         "num_reports_used": current_calibration.num_reports_used,
         "calibration_error_mt": current_calibration.calibration_error,
         "days_since_drydock": current_calibration.days_since_drydock,
@@ -4661,8 +5462,6 @@ async def set_calibration_factors(
 @app.get("/api/vessel/noon-reports")
 async def get_noon_reports():
     """Get list of uploaded noon reports."""
-    global vessel_calibrator
-
     return {
         "count": len(vessel_calibrator.noon_reports),
         "reports": [
@@ -4676,7 +5475,7 @@ async def get_noon_reports():
                 "is_laden": r.is_laden,
             }
             for r in vessel_calibrator.noon_reports
-        ]
+        ],
     }
 
 
@@ -4692,8 +5491,6 @@ async def add_noon_report(
 
     Requires authentication via API key.
     """
-    global vessel_calibrator
-
     nr = NoonReport(
         timestamp=report.timestamp,
         latitude=report.latitude,
@@ -4743,15 +5540,13 @@ async def upload_noon_reports_csv(
     - wave_height_m, wave_direction_deg (optional)
     - heading_deg (optional)
     """
-    global vessel_calibrator
-
     try:
         # Read and validate file size
         content = await file.read()
         if len(content) > MAX_CSV_SIZE_BYTES:
             raise HTTPException(
                 status_code=413,
-                detail=f"File too large. Maximum size: {MAX_CSV_SIZE_BYTES // (1024*1024)} MB"
+                detail=f"File too large. Maximum size: {MAX_CSV_SIZE_BYTES // (1024*1024)} MB",
             )
 
         if len(content) == 0:
@@ -4759,7 +5554,8 @@ async def upload_noon_reports_csv(
 
         # Save to temp file
         import tempfile
-        with tempfile.NamedTemporaryFile(mode='wb', suffix='.csv', delete=False) as tmp:
+
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".csv", delete=False) as tmp:
             tmp.write(content)
             tmp_path = Path(tmp.name)
 
@@ -4795,14 +5591,12 @@ async def upload_noon_reports_excel(
 
     Uses ExcelParser to auto-detect column mappings.
     """
-    global vessel_calibrator
-
     try:
         content = await file.read()
         if len(content) > MAX_CSV_SIZE_BYTES:
             raise HTTPException(
                 status_code=413,
-                detail=f"File too large. Maximum size: {MAX_CSV_SIZE_BYTES // (1024*1024)} MB"
+                detail=f"File too large. Maximum size: {MAX_CSV_SIZE_BYTES // (1024*1024)} MB",
             )
 
         # Determine suffix from filename
@@ -4811,6 +5605,7 @@ async def upload_noon_reports_excel(
             suffix = Path(file.filename).suffix or ".xlsx"
 
         import tempfile
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(content)
             tmp_path = Path(tmp.name)
@@ -4844,8 +5639,6 @@ async def clear_noon_reports(
 
     Requires authentication via API key.
     """
-    global vessel_calibrator
-
     vessel_calibrator.noon_reports = []
     return {"status": "success", "message": "All noon reports cleared"}
 
@@ -4865,14 +5658,14 @@ async def calibrate_vessel(
     Finds optimal calibration factors that minimize prediction error
     compared to actual fuel consumption.
     """
-    global vessel_calibrator, current_calibration
+    global current_calibration
     global current_vessel_model, voyage_calculator, route_optimizer, visir_optimizer
 
     if len(vessel_calibrator.noon_reports) < VesselCalibrator.MIN_REPORTS:
         raise HTTPException(
             status_code=400,
             detail=f"Need at least {VesselCalibrator.MIN_REPORTS} noon reports for calibration. "
-                   f"Currently have {len(vessel_calibrator.noon_reports)}."
+            f"Currently have {len(vessel_calibrator.noon_reports)}.",
         )
 
     try:
@@ -4885,10 +5678,10 @@ async def calibrate_vessel(
         current_vessel_model = VesselModel(
             specs=current_vessel_specs,
             calibration_factors={
-                'calm_water': current_calibration.calm_water,
-                'wind': current_calibration.wind,
-                'waves': current_calibration.waves,
-            }
+                "calm_water": current_calibration.calm_water,
+                "wind": current_calibration.wind,
+                "waves": current_calibration.waves,
+            },
         )
         voyage_calculator = VoyageCalculator(vessel_model=current_vessel_model)
         route_optimizer = RouteOptimizer(vessel_model=current_vessel_model)
@@ -4926,7 +5719,10 @@ async def calibrate_vessel(
 @app.post("/api/vessel/calibration/estimate-fouling")
 async def estimate_hull_fouling(
     days_since_drydock: int = Query(..., ge=0),
-    operating_regions: List[str] = Query(default=[], description="Operating regions: tropical, warm_temperate, cold, polar"),
+    operating_regions: List[str] = Query(
+        default=[],
+        description="Operating regions: tropical, warm_temperate, cold, polar",
+    ),
 ):
     """
     Estimate hull fouling factor without calibration data.
@@ -4934,8 +5730,6 @@ async def estimate_hull_fouling(
     Useful when no noon reports are available but you know
     the vessel's operating history.
     """
-    global vessel_calibrator
-
     fouling = vessel_calibrator.estimate_hull_fouling(
         days_since_drydock=days_since_drydock,
         operating_regions=operating_regions,
@@ -4954,14 +5748,17 @@ async def estimate_hull_fouling(
 # API Endpoints - Regulatory Zones
 # ============================================================================
 
+
 class ZoneCoordinate(BaseModel):
     """A coordinate in a zone polygon."""
+
     lat: float
     lon: float
 
 
 class CreateZoneRequest(BaseModel):
     """Request to create a custom zone."""
+
     name: str
     zone_type: str = Field(..., description="eca, hra, tss, exclusion, custom, etc.")
     interaction: str = Field(..., description="mandatory, exclusion, penalty, advisory")
@@ -4972,6 +5769,7 @@ class CreateZoneRequest(BaseModel):
 
 class ZoneResponse(BaseModel):
     """Zone information response."""
+
     id: str
     name: str
     zone_type: str
@@ -4999,14 +5797,16 @@ async def list_zones():
     zone_checker = get_zone_checker()
     zones = []
     for zone in zone_checker.get_all_zones():
-        zones.append({
-            "id": zone.id,
-            "name": zone.properties.name,
-            "zone_type": zone.properties.zone_type.value,
-            "interaction": zone.properties.interaction.value,
-            "penalty_factor": zone.properties.penalty_factor,
-            "is_builtin": zone.is_builtin,
-        })
+        zones.append(
+            {
+                "id": zone.id,
+                "name": zone.properties.name,
+                "zone_type": zone.properties.zone_type.value,
+                "interaction": zone.properties.interaction.value,
+                "penalty_factor": zone.properties.penalty_factor,
+                "is_builtin": zone.is_builtin,
+            }
+        )
     return {"zones": zones, "count": len(zones)}
 
 
@@ -5047,7 +5847,7 @@ async def create_zone(
     except ValueError:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid zone_type. Valid values: {[t.value for t in ZoneType]}"
+            detail=f"Invalid zone_type. Valid values: {[t.value for t in ZoneType]}",
         )
 
     # Validate interaction
@@ -5056,7 +5856,7 @@ async def create_zone(
     except ValueError:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid interaction. Valid values: {[i.value for i in ZoneInteraction]}"
+            detail=f"Invalid interaction. Valid values: {[i.value for i in ZoneInteraction]}",
         )
 
     # Convert coordinates
@@ -5141,7 +5941,7 @@ async def get_zones_at_point(
                 "penalty_factor": z.properties.penalty_factor,
             }
             for z in zones
-        ]
+        ],
     }
 
 
@@ -5163,14 +5963,11 @@ async def check_path_zones(
             "to": {"lat": lat2, "lon": lon2},
         },
         "zones": {
-            interaction: [
-                {"id": z.id, "name": z.properties.name}
-                for z in zones
-            ]
+            interaction: [{"id": z.id, "name": z.properties.name} for z in zones]
             for interaction, zones in zones_by_type.items()
         },
-        "penalty_factor": penalty if penalty != float('inf') else None,
-        "is_forbidden": penalty == float('inf'),
+        "penalty_factor": penalty if penalty != float("inf") else None,
+        "is_forbidden": penalty == float("inf"),
         "warnings": warnings,
     }
 
@@ -5255,7 +6052,9 @@ async def _ingestion_loop():
                 r.setex(_REDIS_INGESTION_STATUS, 1800, "1")
 
             _ingestion_running = True
-            logger.info("Background weather ingestion starting (this worker acquired lock)")
+            logger.info(
+                "Background weather ingestion starting (this worker acquired lock)"
+            )
             await asyncio.to_thread(weather_ingestion.ingest_all)
             logger.info("Background weather ingestion complete")
         except Exception as e:
@@ -5277,13 +6076,16 @@ async def trigger_weather_ingestion():
     if is_demo():
         return demo_mode_response("Weather ingestion")
 
-    global _ingestion_running
-
     if weather_ingestion is None:
-        raise HTTPException(status_code=503, detail="Weather ingestion not configured (no PostgreSQL)")
+        raise HTTPException(
+            status_code=503, detail="Weather ingestion not configured (no PostgreSQL)"
+        )
 
     if _is_ingestion_running():
-        return {"status": "already_running", "message": "Ingestion is already in progress"}
+        return {
+            "status": "already_running",
+            "message": "Ingestion is already in progress",
+        }
 
     async def _run():
         global _ingestion_running
@@ -5337,6 +6139,7 @@ async def get_ingestion_status():
 
 class CIIFuelConsumption(BaseModel):
     """Fuel consumption by type in metric tons."""
+
     hfo: float = Field(0, ge=0, description="Heavy Fuel Oil (MT)")
     lfo: float = Field(0, ge=0, description="Light Fuel Oil (MT)")
     vlsfo: float = Field(0, ge=0, description="Very Low Sulphur Fuel Oil (MT)")
@@ -5354,28 +6157,35 @@ class CIIFuelConsumption(BaseModel):
 
 class CIICalculateRequest(BaseModel):
     """Request for CII calculation."""
+
     fuel_consumption_mt: CIIFuelConsumption
     total_distance_nm: float = Field(..., gt=0)
     dwt: float = Field(..., gt=0)
     vessel_type: str = Field("tanker", description="IMO vessel type category")
     year: int = Field(2024, ge=2019, le=2040)
-    gt: Optional[float] = Field(None, gt=0, description="Gross tonnage (for cruise/ro-ro passenger)")
+    gt: Optional[float] = Field(
+        None, gt=0, description="Gross tonnage (for cruise/ro-ro passenger)"
+    )
 
 
 class CIIProjectRequest(BaseModel):
     """Request for multi-year CII projection."""
+
     annual_fuel_mt: CIIFuelConsumption
     annual_distance_nm: float = Field(..., gt=0)
     dwt: float = Field(..., gt=0)
     vessel_type: str = Field("tanker")
     start_year: int = Field(2024, ge=2019, le=2040)
     end_year: int = Field(2030, ge=2019, le=2040)
-    fuel_efficiency_improvement_pct: float = Field(0, ge=0, le=20, description="Annual efficiency improvement %")
+    fuel_efficiency_improvement_pct: float = Field(
+        0, ge=0, le=20, description="Annual efficiency improvement %"
+    )
     gt: Optional[float] = Field(None, gt=0)
 
 
 class CIIReductionRequest(BaseModel):
     """Request for CII reduction calculation."""
+
     current_fuel_mt: CIIFuelConsumption
     current_distance_nm: float = Field(..., gt=0)
     dwt: float = Field(..., gt=0)
@@ -5390,7 +6200,10 @@ def _resolve_vessel_type(name: str) -> CIIVesselType:
     mapping = {vt.value: vt for vt in CIIVesselType}
     if name in mapping:
         return mapping[name]
-    raise HTTPException(status_code=400, detail=f"Unknown vessel type: {name}. Valid: {list(mapping.keys())}")
+    raise HTTPException(
+        status_code=400,
+        detail=f"Unknown vessel type: {name}. Valid: {list(mapping.keys())}",
+    )
 
 
 def _resolve_target_rating(name: str) -> CIIRating:
@@ -5398,7 +6211,9 @@ def _resolve_target_rating(name: str) -> CIIRating:
     mapping = {r.value: r for r in CIIRating}
     if name.upper() in mapping:
         return mapping[name.upper()]
-    raise HTTPException(status_code=400, detail=f"Unknown rating: {name}. Valid: A, B, C, D, E")
+    raise HTTPException(
+        status_code=400, detail=f"Unknown rating: {name}. Valid: A, B, C, D, E"
+    )
 
 
 def _compliance_status(rating: CIIRating) -> str:
@@ -5434,11 +6249,19 @@ async def get_cii_fuel_types():
 async def calculate_cii(request: CIICalculateRequest):
     """Calculate CII rating for given fuel consumption and distance."""
     vtype = _resolve_vessel_type(request.vessel_type)
-    gt = request.gt if vtype in (CIIVesselType.CRUISE_PASSENGER, CIIVesselType.RO_RO_PASSENGER) else None
+    gt = (
+        request.gt
+        if vtype in (CIIVesselType.CRUISE_PASSENGER, CIIVesselType.RO_RO_PASSENGER)
+        else None
+    )
 
     try:
-        calc = CIICalculator(vessel_type=vtype, dwt=request.dwt, year=request.year, gt=gt)
-        result = calc.calculate(request.fuel_consumption_mt.to_dict(), request.total_distance_nm)
+        calc = CIICalculator(
+            vessel_type=vtype, dwt=request.dwt, year=request.year, gt=gt
+        )
+        result = calc.calculate(
+            request.fuel_consumption_mt.to_dict(), request.total_distance_nm
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -5463,10 +6286,16 @@ async def calculate_cii(request: CIICalculateRequest):
 async def project_cii(request: CIIProjectRequest):
     """Project CII rating across multiple years with optional efficiency improvements."""
     vtype = _resolve_vessel_type(request.vessel_type)
-    gt = request.gt if vtype in (CIIVesselType.CRUISE_PASSENGER, CIIVesselType.RO_RO_PASSENGER) else None
+    gt = (
+        request.gt
+        if vtype in (CIIVesselType.CRUISE_PASSENGER, CIIVesselType.RO_RO_PASSENGER)
+        else None
+    )
 
     try:
-        calc = CIICalculator(vessel_type=vtype, dwt=request.dwt, year=request.start_year, gt=gt)
+        calc = CIICalculator(
+            vessel_type=vtype, dwt=request.dwt, year=request.start_year, gt=gt
+        )
         years = list(range(request.start_year, request.end_year + 1))
         projections = calc.project_rating(
             request.annual_fuel_mt.to_dict(),
@@ -5493,20 +6322,28 @@ async def project_cii(request: CIIProjectRequest):
     current_rating = projections[0].rating.value if projections else "?"
     final_rating = projections[-1].rating.value if projections else "?"
     years_until_d = next(
-        (p.year - projections[0].year for p in projections if p.rating in (CIIRating.D, CIIRating.E)),
-        "N/A"
+        (
+            p.year - projections[0].year
+            for p in projections
+            if p.rating in (CIIRating.D, CIIRating.E)
+        ),
+        "N/A",
     )
     years_until_e = next(
         (p.year - projections[0].year for p in projections if p.rating == CIIRating.E),
-        "N/A"
+        "N/A",
     )
 
     if final_rating in ("D", "E"):
         recommendation = f"Action required: rating degrades to {final_rating} by {projections[-1].year}."
     elif final_rating == "C":
-        recommendation = "Borderline: rating reaches C. Consider efficiency improvements."
+        recommendation = (
+            "Borderline: rating reaches C. Consider efficiency improvements."
+        )
     else:
-        recommendation = f"On track: rating remains {final_rating} through {projections[-1].year}."
+        recommendation = (
+            f"On track: rating remains {final_rating} through {projections[-1].year}."
+        )
 
     return {
         "projections": proj_list,
@@ -5525,10 +6362,16 @@ async def calculate_cii_reduction(request: CIIReductionRequest):
     """Calculate fuel reduction needed to achieve a target CII rating."""
     vtype = _resolve_vessel_type(request.vessel_type)
     target = _resolve_target_rating(request.target_rating)
-    gt = request.gt if vtype in (CIIVesselType.CRUISE_PASSENGER, CIIVesselType.RO_RO_PASSENGER) else None
+    gt = (
+        request.gt
+        if vtype in (CIIVesselType.CRUISE_PASSENGER, CIIVesselType.RO_RO_PASSENGER)
+        else None
+    )
 
     try:
-        calc = CIICalculator(vessel_type=vtype, dwt=request.dwt, year=request.target_year, gt=gt)
+        calc = CIICalculator(
+            vessel_type=vtype, dwt=request.dwt, year=request.target_year, gt=gt
+        )
         result = calc.calculate_required_reduction(
             request.current_fuel_mt.to_dict(),
             request.current_distance_nm,
@@ -5566,7 +6409,9 @@ async def get_weather_freshness():
             "color": "red",
         }
 
-    age_hours = freshness.get("age_hours", None) if isinstance(freshness, dict) else None
+    age_hours = (
+        freshness.get("age_hours", None) if isinstance(freshness, dict) else None
+    )
     if age_hours is not None:
         if age_hours < 4:
             color = "green"

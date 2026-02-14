@@ -15,13 +15,13 @@ from typing import Dict, Optional
 
 import numpy as np
 
-
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
 # Seawater property functions (SPEC-P1)
 # ---------------------------------------------------------------------------
+
 
 def seawater_density(sst_celsius: float) -> float:
     """UNESCO 1983 simplified equation of state (salinity=35 PSU)."""
@@ -148,18 +148,24 @@ class VesselModel:
         # Get vessel parameters for loading condition
         draft = self.specs.draft_laden if is_laden else self.specs.draft_ballast
         displacement = (
-            self.specs.displacement_laden if is_laden
+            self.specs.displacement_laden
+            if is_laden
             else self.specs.displacement_ballast
         )
         cb = self.specs.cb_laden if is_laden else self.specs.cb_ballast
         wetted_surface = (
-            self.specs.wetted_surface_laden if is_laden
+            self.specs.wetted_surface_laden
+            if is_laden
             else self.specs.wetted_surface_ballast
         )
 
         # Calculate calm water resistance (with SST-corrected properties when available)
         resistance_calm = self._holtrop_mennen_resistance(
-            speed_ms, draft, displacement, cb, wetted_surface,
+            speed_ms,
+            draft,
+            displacement,
+            cb,
+            wetted_surface,
             sst_celsius=sst_celsius,
         )
 
@@ -196,9 +202,7 @@ class VesselModel:
 
         # Account for propulsion efficiencies
         brake_power_kw = tow_power_kw / (
-            self.PROP_EFFICIENCY
-            * self.HULL_EFFICIENCY
-            * self.RELATIVE_ROTATIVE_EFF
+            self.PROP_EFFICIENCY * self.HULL_EFFICIENCY * self.RELATIVE_ROTATIVE_EFF
         )
 
         # Store uncapped power (needed for speed reduction calculations)
@@ -223,15 +227,21 @@ class VesselModel:
             "required_power_kw": required_brake_power_kw,
             "time_hours": time_hours,
             "fuel_breakdown": {
-                "calm_water": (resistance_calm / total_resistance) * fuel_mt
-                if total_resistance > 0
-                else fuel_mt,
-                "wind": (resistance_wind / total_resistance) * fuel_mt
-                if total_resistance > 0
-                else 0.0,
-                "waves": (resistance_waves / total_resistance) * fuel_mt
-                if total_resistance > 0
-                else 0.0,
+                "calm_water": (
+                    (resistance_calm / total_resistance) * fuel_mt
+                    if total_resistance > 0
+                    else fuel_mt
+                ),
+                "wind": (
+                    (resistance_wind / total_resistance) * fuel_mt
+                    if total_resistance > 0
+                    else 0.0
+                ),
+                "waves": (
+                    (resistance_waves / total_resistance) * fuel_mt
+                    if total_resistance > 0
+                    else 0.0
+                ),
             },
             "resistance_breakdown_kn": {
                 "calm_water": resistance_calm / 1000.0,
@@ -339,11 +349,13 @@ class VesselModel:
         relative_angle_rad = np.radians(relative_angle)
 
         frontal_area = (
-            self.specs.frontal_area_laden if is_laden
+            self.specs.frontal_area_laden
+            if is_laden
             else self.specs.frontal_area_ballast
         )
         lateral_area = (
-            self.specs.lateral_area_laden if is_laden
+            self.specs.lateral_area_laden
+            if is_laden
             else self.specs.lateral_area_ballast
         )
 
@@ -351,22 +363,13 @@ class VesselModel:
         # Headwind (0°) → max drag ~0.8, tailwind (180°) → 0 drag
         cx_drag = 0.8 * np.cos(relative_angle_rad)
         direct_resistance = (
-            max(0.0, cx_drag)
-            * 0.5
-            * self.RHO_AIR
-            * wind_speed_ms**2
-            * frontal_area
+            max(0.0, cx_drag) * 0.5 * self.RHO_AIR * wind_speed_ms**2 * frontal_area
         )
 
         # Transverse wind creates drift, adding ~10% to effective resistance
         cy = 0.9 * abs(np.sin(relative_angle_rad))
         drift_resistance = (
-            0.1
-            * cy
-            * 0.5
-            * self.RHO_AIR
-            * wind_speed_ms**2
-            * lateral_area
+            0.1 * cy * 0.5 * self.RHO_AIR * wind_speed_ms**2 * lateral_area
         )
 
         return direct_resistance + drift_resistance
@@ -460,7 +463,8 @@ class VesselModel:
         # The SFOC curve has its optimum at ~75-85% MCR load; the speed
         # that produces that load is the most fuel-efficient operating point.
         service_speed = (
-            self.specs.service_speed_laden if is_laden
+            self.specs.service_speed_laden
+            if is_laden
             else self.specs.service_speed_ballast
         )
 

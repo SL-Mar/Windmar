@@ -5,6 +5,7 @@ Provides proper locking and isolation for shared state in concurrent environment
 This replaces the unsafe global state pattern with a singleton that ensures
 thread safety and proper initialization.
 """
+
 import threading
 import logging
 from typing import Optional, Dict, Any
@@ -23,6 +24,7 @@ class VesselState:
     Uses a lock to ensure atomic updates across all related objects
     (specs, model, calculators).
     """
+
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     # Lazy imports to avoid circular dependencies
@@ -148,10 +150,10 @@ class VesselState:
             self._model = VesselModel(
                 specs=self._specs,
                 calibration_factors={
-                    'calm_water': calibration_factors.calm_water,
-                    'wind': calibration_factors.wind,
-                    'waves': calibration_factors.waves,
-                }
+                    "calm_water": calibration_factors.calm_water,
+                    "wind": calibration_factors.wind,
+                    "waves": calibration_factors.waves,
+                },
             )
             self._voyage_calculator = VoyageCalculator(vessel_model=self._model)
             self._route_optimizer = RouteOptimizer(vessel_model=self._model)
@@ -167,13 +169,13 @@ class VesselState:
         """
         with self._lock:
             return {
-                'specs': self._specs,
-                'model': self._model,
-                'voyage_calculator': self._voyage_calculator,
-                'route_optimizer': self._route_optimizer,
-                'visir_optimizer': self._visir_optimizer,
-                'calibrator': self._calibrator,
-                'calibration': self._calibration,
+                "specs": self._specs,
+                "model": self._model,
+                "voyage_calculator": self._voyage_calculator,
+                "route_optimizer": self._route_optimizer,
+                "visir_optimizer": self._visir_optimizer,
+                "calibrator": self._calibrator,
+                "calibration": self._calibration,
             }
 
 
@@ -185,7 +187,7 @@ class ApplicationState:
     Use get_app_state() to access the singleton instance.
     """
 
-    _instance: Optional['ApplicationState'] = None
+    _instance: Optional["ApplicationState"] = None
     _lock: threading.Lock = threading.Lock()
 
     def __new__(cls):
@@ -245,10 +247,10 @@ class ApplicationState:
         synthetic = SyntheticDataProvider()
 
         self._weather_providers = {
-            'copernicus': copernicus,
-            'climatology': climatology,
-            'unified': unified,
-            'synthetic': synthetic,
+            "copernicus": copernicus,
+            "climatology": climatology,
+            "unified": unified,
+            "synthetic": synthetic,
         }
 
         logger.info("Weather providers initialized")
@@ -266,9 +268,13 @@ class ApplicationState:
             Dict with health status of each component
         """
         return {
-            'vessel_state': 'healthy' if self._vessel_state.specs is not None else 'unhealthy',
-            'weather_providers': 'healthy' if self._weather_providers is not None else 'not_initialized',
-            'uptime_seconds': self.uptime_seconds,
+            "vessel_state": (
+                "healthy" if self._vessel_state.specs is not None else "unhealthy"
+            ),
+            "weather_providers": (
+                "healthy" if self._weather_providers is not None else "not_initialized"
+            ),
+            "uptime_seconds": self.uptime_seconds,
         }
 
 

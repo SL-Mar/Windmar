@@ -2,6 +2,7 @@
 Configuration management for WINDMAR API.
 Loads environment variables and provides typed configuration.
 """
+
 import os
 from typing import List, Optional
 from functools import lru_cache
@@ -98,8 +99,10 @@ class Settings(BaseSettings):
 
     @property
     def has_cmems_credentials(self) -> bool:
-        return (self.copernicusmarine_service_username is not None
-                and self.copernicusmarine_service_password is not None)
+        return (
+            self.copernicusmarine_service_username is not None
+            and self.copernicusmarine_service_password is not None
+        )
 
     # ========================================================================
     # Performance Configuration
@@ -118,10 +121,7 @@ class Settings(BaseSettings):
     # Pydantic Settings Configuration
     # ========================================================================
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore"
+        env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
     )
 
 
@@ -151,6 +151,4 @@ if settings.is_production and not settings.demo_mode:
         raise ValueError("AUTH_ENABLED must be true in production!")
 
     if "localhost" in settings.cors_origins.lower():
-        raise ValueError(
-            "CORS_ORIGINS must not include localhost in production!"
-        )
+        raise ValueError("CORS_ORIGINS must not include localhost in production!")

@@ -15,7 +15,6 @@ from scipy.optimize import minimize
 
 from ..optimization.vessel_model import VesselModel, VesselSpecs
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -78,9 +77,7 @@ class ModelCalibrator:
         laden_reports = [r for r in valid_reports if r["is_laden"]]
         ballast_reports = [r for r in valid_reports if not r["is_laden"]]
 
-        logger.info(
-            f"Laden: {len(laden_reports)}, Ballast: {len(ballast_reports)}"
-        )
+        logger.info(f"Laden: {len(laden_reports)}, Ballast: {len(ballast_reports)}")
 
         # Set initial factors
         if initial_factors is None:
@@ -123,12 +120,8 @@ class ModelCalibrator:
             valid_reports, self.calibrated_factors
         )
 
-        logger.info(
-            f"Calibration RMSE: {self.calibration_quality['rmse']:.2f} MT/day"
-        )
-        logger.info(
-            f"Calibration R²: {self.calibration_quality['r_squared']:.3f}"
-        )
+        logger.info(f"Calibration RMSE: {self.calibration_quality['rmse']:.2f} MT/day")
+        logger.info(f"Calibration R²: {self.calibration_quality['r_squared']:.3f}")
 
         return self.calibrated_factors
 
@@ -178,9 +171,7 @@ class ModelCalibrator:
 
         return valid
 
-    def _objective_function(
-        self, factors: np.ndarray, reports: List[Dict]
-    ) -> float:
+    def _objective_function(self, factors: np.ndarray, reports: List[Dict]) -> float:
         """
         Objective function for optimization.
 
@@ -368,9 +359,13 @@ class ModelCalibrator:
         report.append("")
 
         report.append("Calibration Factors:")
-        report.append(f"  Calm Water Resistance: {self.calibrated_factors['calm_water']:.3f}")
+        report.append(
+            f"  Calm Water Resistance: {self.calibrated_factors['calm_water']:.3f}"
+        )
         report.append(f"  Wind Resistance:       {self.calibrated_factors['wind']:.3f}")
-        report.append(f"  Wave Resistance:       {self.calibrated_factors['waves']:.3f}")
+        report.append(
+            f"  Wave Resistance:       {self.calibrated_factors['waves']:.3f}"
+        )
         report.append("")
 
         q = self.calibration_quality
@@ -387,19 +382,19 @@ class ModelCalibrator:
 
         # Interpretation
         report.append("Interpretation:")
-        if q['r_squared'] > 0.8:
+        if q["r_squared"] > 0.8:
             report.append("  ✓ Excellent calibration quality (R² > 0.8)")
-        elif q['r_squared'] > 0.6:
+        elif q["r_squared"] > 0.6:
             report.append("  ✓ Good calibration quality (R² > 0.6)")
-        elif q['r_squared'] > 0.4:
+        elif q["r_squared"] > 0.4:
             report.append("  ⚠ Moderate calibration quality (R² > 0.4)")
         else:
             report.append("  ✗ Poor calibration quality (R² < 0.4)")
             report.append("    Consider collecting more data or checking data quality")
 
-        if q['mape'] < 10:
+        if q["mape"] < 10:
             report.append("  ✓ Low prediction error (MAPE < 10%)")
-        elif q['mape'] < 20:
+        elif q["mape"] < 20:
             report.append("  ⚠ Moderate prediction error (MAPE < 20%)")
         else:
             report.append("  ✗ High prediction error (MAPE > 20%)")

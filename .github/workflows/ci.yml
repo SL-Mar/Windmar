@@ -142,6 +142,8 @@ jobs:
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest
+    permissions:
+      security-events: write
 
     steps:
       - name: Checkout code
@@ -156,7 +158,7 @@ jobs:
           output: 'trivy-results.sarif'
 
       - name: Upload Trivy results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: 'trivy-results.sarif'
 
@@ -222,11 +224,11 @@ jobs:
           EOF
 
       - name: Start services
-        run: docker-compose up -d
+        run: docker compose up -d
 
       - name: Wait for services to be healthy
         run: |
-          timeout 120 bash -c 'until docker-compose ps | grep -q "healthy"; do sleep 2; done'
+          timeout 120 bash -c 'until docker compose ps | grep -q "healthy"; do sleep 2; done'
 
       - name: Test API health
         run: |
@@ -238,11 +240,11 @@ jobs:
 
       - name: Show logs on failure
         if: failure()
-        run: docker-compose logs
+        run: docker compose logs
 
       - name: Stop services
         if: always()
-        run: docker-compose down -v
+        run: docker compose down -v
 
   # Code quality
   code-quality:

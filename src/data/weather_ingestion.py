@@ -66,7 +66,9 @@ class WeatherIngestionService:
         source = "gfs"
 
         if not force and self._has_multistep_run(source):
-            logger.debug("Skipping wind ingestion — multi-timestep GFS run exists in DB")
+            logger.debug(
+                "Skipping wind ingestion — multi-timestep GFS run exists in DB"
+            )
             return
 
         run_time = datetime.now(timezone.utc)
@@ -88,9 +90,16 @@ class WeatherIngestionService:
                     lat_min, lat_max, lon_min, lon_max, forecast_hours)
                    VALUES (%s, %s, 'ingesting', %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
-                (source, run_time, self.GRID_RESOLUTION,
-                 self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
-                 self.gfs_provider.FORECAST_HOURS),
+                (
+                    source,
+                    run_time,
+                    self.GRID_RESOLUTION,
+                    self.LAT_MIN,
+                    self.LAT_MAX,
+                    self.LON_MIN,
+                    self.LON_MAX,
+                    self.gfs_provider.FORECAST_HOURS,
+                ),
             )
             run_id = cur.fetchone()[0]
             conn.commit()
@@ -99,8 +108,10 @@ class WeatherIngestionService:
             for i, fh in enumerate(self.gfs_provider.FORECAST_HOURS):
                 try:
                     wind_data = self.gfs_provider.fetch_wind_data(
-                        self.LAT_MIN, self.LAT_MAX,
-                        self.LON_MIN, self.LON_MAX,
+                        self.LAT_MIN,
+                        self.LAT_MAX,
+                        self.LON_MIN,
+                        self.LON_MAX,
                         forecast_hour=fh,
                     )
                     if wind_data is None:
@@ -129,13 +140,23 @@ class WeatherIngestionService:
                                             lons = EXCLUDED.lons,
                                             shape_rows = EXCLUDED.shape_rows,
                                             shape_cols = EXCLUDED.shape_cols""",
-                            (run_id, fh, param, lats_blob, lons_blob,
-                             self._compress(np.asarray(arr)), rows, cols),
+                            (
+                                run_id,
+                                fh,
+                                param,
+                                lats_blob,
+                                lons_blob,
+                                self._compress(np.asarray(arr)),
+                                rows,
+                                cols,
+                            ),
                         )
 
                     ingested_hours.append(fh)
                     conn.commit()
-                    logger.debug(f"Ingested GFS wind f{fh:03d} ({i+1}/{len(self.gfs_provider.FORECAST_HOURS)})")
+                    logger.debug(
+                        f"Ingested GFS wind f{fh:03d} ({i+1}/{len(self.gfs_provider.FORECAST_HOURS)})"
+                    )
 
                     # Rate-limit NOMADS requests (2s between downloads)
                     if i < len(self.gfs_provider.FORECAST_HOURS) - 1:
@@ -152,7 +173,9 @@ class WeatherIngestionService:
                 (status, ingested_hours, run_id),
             )
             conn.commit()
-            logger.info(f"GFS wind ingestion {status}: {len(ingested_hours)}/{len(self.gfs_provider.FORECAST_HOURS)} hours")
+            logger.info(
+                f"GFS wind ingestion {status}: {len(ingested_hours)}/{len(self.gfs_provider.FORECAST_HOURS)} hours"
+            )
 
         except Exception as e:
             logger.error(f"Wind ingestion failed: {e}")
@@ -204,15 +227,25 @@ class WeatherIngestionService:
                    ON CONFLICT (source, run_time) DO UPDATE
                    SET status = 'ingesting', ingested_at = NOW()
                    RETURNING id""",
-                (source, run_time, self.GRID_RESOLUTION,
-                 self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
-                 [0]),
+                (
+                    source,
+                    run_time,
+                    self.GRID_RESOLUTION,
+                    self.LAT_MIN,
+                    self.LAT_MAX,
+                    self.LON_MIN,
+                    self.LON_MAX,
+                    [0],
+                ),
             )
             run_id = cur.fetchone()[0]
             conn.commit()
 
             wave_data = self.copernicus_provider.fetch_wave_data(
-                self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
+                self.LAT_MIN,
+                self.LAT_MAX,
+                self.LON_MIN,
+                self.LON_MAX,
             )
             if wave_data is None:
                 cur.execute(
@@ -251,8 +284,15 @@ class WeatherIngestionService:
                                     lons = EXCLUDED.lons,
                                     shape_rows = EXCLUDED.shape_rows,
                                     shape_cols = EXCLUDED.shape_cols""",
-                    (run_id, param, lats_blob, lons_blob,
-                     self._compress(np.asarray(arr)), rows, cols),
+                    (
+                        run_id,
+                        param,
+                        lats_blob,
+                        lons_blob,
+                        self._compress(np.asarray(arr)),
+                        rows,
+                        cols,
+                    ),
                 )
 
             cur.execute(
@@ -292,15 +332,25 @@ class WeatherIngestionService:
                    ON CONFLICT (source, run_time) DO UPDATE
                    SET status = 'ingesting', ingested_at = NOW()
                    RETURNING id""",
-                (source, run_time, self.GRID_RESOLUTION,
-                 self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
-                 [0]),
+                (
+                    source,
+                    run_time,
+                    self.GRID_RESOLUTION,
+                    self.LAT_MIN,
+                    self.LAT_MAX,
+                    self.LON_MIN,
+                    self.LON_MAX,
+                    [0],
+                ),
             )
             run_id = cur.fetchone()[0]
             conn.commit()
 
             current_data = self.copernicus_provider.fetch_current_data(
-                self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
+                self.LAT_MIN,
+                self.LAT_MAX,
+                self.LON_MIN,
+                self.LON_MAX,
             )
             if current_data is None:
                 cur.execute(
@@ -332,8 +382,15 @@ class WeatherIngestionService:
                                     lons = EXCLUDED.lons,
                                     shape_rows = EXCLUDED.shape_rows,
                                     shape_cols = EXCLUDED.shape_cols""",
-                    (run_id, param, lats_blob, lons_blob,
-                     self._compress(np.asarray(arr)), rows, cols),
+                    (
+                        run_id,
+                        param,
+                        lats_blob,
+                        lons_blob,
+                        self._compress(np.asarray(arr)),
+                        rows,
+                        cols,
+                    ),
                 )
 
             cur.execute(
@@ -373,15 +430,25 @@ class WeatherIngestionService:
                    ON CONFLICT (source, run_time) DO UPDATE
                    SET status = 'ingesting', ingested_at = NOW()
                    RETURNING id""",
-                (source, run_time, self.GRID_RESOLUTION,
-                 self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
-                 [0]),
+                (
+                    source,
+                    run_time,
+                    self.GRID_RESOLUTION,
+                    self.LAT_MIN,
+                    self.LAT_MAX,
+                    self.LON_MIN,
+                    self.LON_MAX,
+                    [0],
+                ),
             )
             run_id = cur.fetchone()[0]
             conn.commit()
 
             ice_data = self.copernicus_provider.fetch_ice_data(
-                self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
+                self.LAT_MIN,
+                self.LAT_MAX,
+                self.LON_MIN,
+                self.LON_MAX,
             )
             if ice_data is None:
                 cur.execute(
@@ -397,7 +464,11 @@ class WeatherIngestionService:
             rows = len(ice_data.lats)
             cols = len(ice_data.lons)
 
-            arr = ice_data.ice_concentration if ice_data.ice_concentration is not None else ice_data.values
+            arr = (
+                ice_data.ice_concentration
+                if ice_data.ice_concentration is not None
+                else ice_data.values
+            )
             if arr is not None:
                 cur.execute(
                     """INSERT INTO weather_grid_data
@@ -409,8 +480,15 @@ class WeatherIngestionService:
                                     lons = EXCLUDED.lons,
                                     shape_rows = EXCLUDED.shape_rows,
                                     shape_cols = EXCLUDED.shape_cols""",
-                    (run_id, "ice_siconc", lats_blob, lons_blob,
-                     self._compress(np.asarray(arr)), rows, cols),
+                    (
+                        run_id,
+                        "ice_siconc",
+                        lats_blob,
+                        lons_blob,
+                        self._compress(np.asarray(arr)),
+                        rows,
+                        cols,
+                    ),
                 )
 
             cur.execute(
@@ -458,9 +536,16 @@ class WeatherIngestionService:
                     lat_min, lat_max, lon_min, lon_max, forecast_hours)
                    VALUES (%s, %s, 'ingesting', %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
-                (source, run_time, 0.083,
-                 self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
-                 forecast_hours),
+                (
+                    source,
+                    run_time,
+                    0.083,
+                    self.LAT_MIN,
+                    self.LAT_MAX,
+                    self.LON_MIN,
+                    self.LON_MAX,
+                    forecast_hours,
+                ),
             )
             run_id = cur.fetchone()[0]
             conn.commit()
@@ -497,8 +582,16 @@ class WeatherIngestionService:
                                             lons = EXCLUDED.lons,
                                             shape_rows = EXCLUDED.shape_rows,
                                             shape_cols = EXCLUDED.shape_cols""",
-                            (run_id, fh, param, lats_blob, lons_blob,
-                             self._compress(np.asarray(arr)), rows, cols),
+                            (
+                                run_id,
+                                fh,
+                                param,
+                                lats_blob,
+                                lons_blob,
+                                self._compress(np.asarray(arr)),
+                                rows,
+                                cols,
+                            ),
                         )
 
                     ingested_count += 1
@@ -554,9 +647,16 @@ class WeatherIngestionService:
                     lat_min, lat_max, lon_min, lon_max, forecast_hours)
                    VALUES (%s, %s, 'ingesting', %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
-                (source, run_time, 0.083,
-                 self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
-                 forecast_hours),
+                (
+                    source,
+                    run_time,
+                    0.083,
+                    self.LAT_MIN,
+                    self.LAT_MAX,
+                    self.LON_MIN,
+                    self.LON_MAX,
+                    forecast_hours,
+                ),
             )
             run_id = cur.fetchone()[0]
             conn.commit()
@@ -586,8 +686,16 @@ class WeatherIngestionService:
                                             lons = EXCLUDED.lons,
                                             shape_rows = EXCLUDED.shape_rows,
                                             shape_cols = EXCLUDED.shape_cols""",
-                            (run_id, fh, param, lats_blob, lons_blob,
-                             self._compress(np.asarray(arr)), rows, cols),
+                            (
+                                run_id,
+                                fh,
+                                param,
+                                lats_blob,
+                                lons_blob,
+                                self._compress(np.asarray(arr)),
+                                rows,
+                                cols,
+                            ),
                         )
 
                     ingested_count += 1
@@ -644,9 +752,16 @@ class WeatherIngestionService:
                     lat_min, lat_max, lon_min, lon_max, forecast_hours)
                    VALUES (%s, %s, 'ingesting', %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
-                (source, run_time, 0.083,
-                 self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
-                 forecast_hours),
+                (
+                    source,
+                    run_time,
+                    0.083,
+                    self.LAT_MIN,
+                    self.LAT_MAX,
+                    self.LON_MIN,
+                    self.LON_MAX,
+                    forecast_hours,
+                ),
             )
             run_id = cur.fetchone()[0]
             conn.commit()
@@ -660,7 +775,11 @@ class WeatherIngestionService:
                     rows = len(wd.lats)
                     cols = len(wd.lons)
 
-                    arr = wd.ice_concentration if wd.ice_concentration is not None else wd.values
+                    arr = (
+                        wd.ice_concentration
+                        if wd.ice_concentration is not None
+                        else wd.values
+                    )
                     if arr is None:
                         continue
                     cur.execute(
@@ -673,8 +792,16 @@ class WeatherIngestionService:
                                         lons = EXCLUDED.lons,
                                         shape_rows = EXCLUDED.shape_rows,
                                         shape_cols = EXCLUDED.shape_cols""",
-                        (run_id, fh, "ice_siconc", lats_blob, lons_blob,
-                         self._compress(np.asarray(arr)), rows, cols),
+                        (
+                            run_id,
+                            fh,
+                            "ice_siconc",
+                            lats_blob,
+                            lons_blob,
+                            self._compress(np.asarray(arr)),
+                            rows,
+                            cols,
+                        ),
                     )
 
                     ingested_count += 1
@@ -750,8 +877,12 @@ class WeatherIngestionService:
                 "runs": [
                     {
                         "source": r["source"],
-                        "run_time": r["run_time"].isoformat() if r["run_time"] else None,
-                        "ingested_at": r["ingested_at"].isoformat() if r["ingested_at"] else None,
+                        "run_time": (
+                            r["run_time"].isoformat() if r["run_time"] else None
+                        ),
+                        "ingested_at": (
+                            r["ingested_at"].isoformat() if r["ingested_at"] else None
+                        ),
                         "status": r["status"],
                         "forecast_hours": r["forecast_hours"],
                         "grid_resolution": r["grid_resolution"],

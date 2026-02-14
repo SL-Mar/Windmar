@@ -39,7 +39,9 @@ class DbWeatherProvider:
         time: Optional[datetime] = None,
     ) -> Optional[WeatherData]:
         """Load wind data from DB, cropped to bbox. Returns None if unavailable."""
-        return self._load_vector_data("gfs", "wind_u", "wind_v", lat_min, lat_max, lon_min, lon_max, time)
+        return self._load_vector_data(
+            "gfs", "wind_u", "wind_v", lat_min, lat_max, lon_min, lon_max, time
+        )
 
     def get_wave_from_db(
         self,
@@ -72,15 +74,21 @@ class DbWeatherProvider:
                 return None
 
             lats, lons, hs_data = hs
-            lats_c, lons_c, hs_crop = self._crop_grid(lats, lons, hs_data, lat_min, lat_max, lon_min, lon_max)
+            lats_c, lons_c, hs_crop = self._crop_grid(
+                lats, lons, hs_data, lat_min, lat_max, lon_min, lon_max
+            )
 
             tp_crop = None
             if tp is not None:
-                _, _, tp_crop = self._crop_grid(tp[0], tp[1], tp[2], lat_min, lat_max, lon_min, lon_max)
+                _, _, tp_crop = self._crop_grid(
+                    tp[0], tp[1], tp[2], lat_min, lat_max, lon_min, lon_max
+                )
 
             wd_crop = None
             if wd is not None:
-                _, _, wd_crop = self._crop_grid(wd[0], wd[1], wd[2], lat_min, lat_max, lon_min, lon_max)
+                _, _, wd_crop = self._crop_grid(
+                    wd[0], wd[1], wd[2], lat_min, lat_max, lon_min, lon_max
+                )
 
             return WeatherData(
                 parameter="wave_height",
@@ -106,7 +114,15 @@ class DbWeatherProvider:
         lon_max: float,
     ) -> Optional[WeatherData]:
         """Load current data from DB, cropped to bbox. Returns None if unavailable."""
-        return self._load_vector_data("cmems_current", "current_u", "current_v", lat_min, lat_max, lon_min, lon_max)
+        return self._load_vector_data(
+            "cmems_current",
+            "current_u",
+            "current_v",
+            lat_min,
+            lat_max,
+            lon_min,
+            lon_max,
+        )
 
     def get_ice_from_db(
         self,
@@ -187,11 +203,15 @@ class DbWeatherProvider:
             lats, lons, u_data = u_grid
             _, _, v_data = v_grid
 
-            lats_c, lons_c, u_crop = self._crop_grid(lats, lons, u_data, lat_min, lat_max, lon_min, lon_max)
-            _, _, v_crop = self._crop_grid(lats, lons, v_data, lat_min, lat_max, lon_min, lon_max)
+            lats_c, lons_c, u_crop = self._crop_grid(
+                lats, lons, u_data, lat_min, lat_max, lon_min, lon_max
+            )
+            _, _, v_crop = self._crop_grid(
+                lats, lons, v_data, lat_min, lat_max, lon_min, lon_max
+            )
 
             # Compute wind speed as values for WeatherData compatibility
-            speed = np.sqrt(u_crop ** 2 + v_crop ** 2)
+            speed = np.sqrt(u_crop**2 + v_crop**2)
 
             param_name = "wind" if "wind" in u_param else "current"
             return WeatherData(
@@ -299,7 +319,9 @@ class DbWeatherProvider:
     @staticmethod
     def _decompress_2d(blob: bytes, rows: int, cols: int) -> np.ndarray:
         """Decompress zlib blob to 2D float32 numpy array."""
-        return np.frombuffer(zlib.decompress(blob), dtype=np.float32).reshape(rows, cols)
+        return np.frombuffer(zlib.decompress(blob), dtype=np.float32).reshape(
+            rows, cols
+        )
 
     @staticmethod
     def _crop_grid(lats, lons, data, lat_min, lat_max, lon_min, lon_max):
@@ -583,13 +605,11 @@ class DbWeatherProvider:
         conn = self._get_conn()
         try:
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cur.execute(
-                """SELECT source, ingested_at, status
+            cur.execute("""SELECT source, ingested_at, status
                    FROM weather_forecast_runs
                    WHERE status = 'complete'
                    ORDER BY ingested_at DESC
-                   LIMIT 3"""
-            )
+                   LIMIT 3""")
             rows = cur.fetchall()
             if not rows:
                 return None
