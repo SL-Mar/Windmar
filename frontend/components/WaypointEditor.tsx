@@ -1,11 +1,32 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import { Position } from '@/lib/api';
+import { getGridIndices, bilinearOcean } from '@/lib/gridInterpolation';
 
 /** Wrap longitude to [-180, 180] (Leaflet can return unwrapped values). */
 function wrapLng(lng: number): number {
   return ((((lng + 180) % 360) + 360) % 360) - 180;
+}
+
+/** Check if a lat/lon is on water using the ocean mask. Returns true if ocean or no mask. */
+function isOceanPoint(
+  lat: number,
+  lon: number,
+  oceanMask: boolean[][] | null | undefined,
+  oceanMaskLats: number[] | null | undefined,
+  oceanMaskLons: number[] | null | undefined,
+): boolean {
+  if (!oceanMask || !oceanMaskLats || !oceanMaskLons) return true; // no mask = allow
+  const idx = getGridIndices(lat, lon, oceanMaskLats, oceanMaskLons);
+  if (!idx) return true; // out of grid bounds = allow
+  const frac = bilinearOcean(
+    oceanMask,
+    idx.latIdx, idx.lonIdx,
+    idx.latFrac, idx.lonFrac,
+    oceanMaskLats.length, oceanMaskLons.length,
+  );
+  return frac >= 0.5;
 }
 
 interface WaypointEditorProps {
@@ -13,6 +34,9 @@ interface WaypointEditorProps {
   onWaypointsChange: (waypoints: Position[]) => void;
   isEditing: boolean;
   routeColor?: string;
+  oceanMask?: boolean[][] | null;
+  oceanMaskLats?: number[] | null;
+  oceanMaskLons?: number[] | null;
 }
 
 /**
@@ -42,12 +66,16 @@ function WaypointEditorInner({
   onWaypointsChange,
   isEditing,
   routeColor = '#0073e6',
+  oceanMask,
+  oceanMaskLats,
+  oceanMaskLons,
 }: WaypointEditorProps) {
   // Dynamic imports for react-leaflet components
   const { useMap, useMapEvents, Marker, Polyline, Popup } = require('react-leaflet');
   const L = require('leaflet');
 
   const map = useMap();
+  const landToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Create numbered icon
   const createNumberedIcon = useCallback((index: number, total: number) => {
@@ -78,17 +106,32 @@ function WaypointEditorInner({
     });
   }, [L]);
 
+  /** Show a temporary "land" warning popup on the map. */
+  const showLandWarning = useCallback((latlng: any) => {
+    // Remove previous toast if any
+    if (landToastTimerRef.current) clearTimeout(landToastTimerRef.current);
+    const popup = L.popup({ closeButton: false, autoClose: true, closeOnClick: true, className: 'land-warning-popup' })
+      .setLatLng(latlng)
+      .setContent('<div style="color:#ef4444;font-weight:600;font-size:13px;white-space:nowrap">Waypoints must be placed on water</div>')
+      .openOn(map);
+    landToastTimerRef.current = setTimeout(() => { map.closePopup(popup); }, 2000);
+  }, [L, map]);
+
   // Map click handler component
   function MapClickHandler() {
     useMapEvents({
       click(e: any) {
         if (!isEditing) return;
 
-        const newWaypoint: Position = {
-          lat: e.latlng.lat,
-          lon: wrapLng(e.latlng.lng),
-        };
+        const lat = e.latlng.lat;
+        const lon = wrapLng(e.latlng.lng);
 
+        if (!isOceanPoint(lat, lon, oceanMask, oceanMaskLats, oceanMaskLons)) {
+          showLandWarning(e.latlng);
+          return;
+        }
+
+        const newWaypoint: Position = { lat, lon };
         onWaypointsChange([...waypoints, newWaypoint]);
       },
     });
@@ -100,16 +143,21 @@ function WaypointEditorInner({
     (index: number, e: any) => {
       const marker = e.target;
       const position = marker.getLatLng();
+      const lat = position.lat;
+      const lon = wrapLng(position.lng);
+
+      if (!isOceanPoint(lat, lon, oceanMask, oceanMaskLats, oceanMaskLons)) {
+        // Snap back to original position
+        marker.setLatLng([waypoints[index].lat, waypoints[index].lon]);
+        showLandWarning(position);
+        return;
+      }
 
       const newWaypoints = [...waypoints];
-      newWaypoints[index] = {
-        lat: position.lat,
-        lon: wrapLng(position.lng),
-      };
-
+      newWaypoints[index] = { lat, lon };
       onWaypointsChange(newWaypoints);
     },
-    [waypoints, onWaypointsChange]
+    [waypoints, onWaypointsChange, oceanMask, oceanMaskLats, oceanMaskLons, showLandWarning]
   );
 
   // Handle waypoint deletion

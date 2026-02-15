@@ -967,6 +967,9 @@ export default function HomePage() {
             extendedWeatherData={extendedWeatherData}
             fitBounds={fitBounds}
             fitKey={fitKey}
+            oceanMask={windData?.ocean_mask ?? null}
+            oceanMaskLats={windData?.ocean_mask_lats ?? null}
+            oceanMaskLons={windData?.ocean_mask_lons ?? null}
           >
             {/* Weather mode: overlay controls */}
             <MapOverlayControls

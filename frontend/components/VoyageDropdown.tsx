@@ -1,9 +1,10 @@
 'use client';
 
-import { Wind, Upload, Trash2, MapPin, Maximize2 } from 'lucide-react';
+import { Wind, Upload, Trash2, MapPin, Maximize2, PenLine } from 'lucide-react';
 import { useVoyage } from '@/components/VoyageContext';
 import RouteImport from '@/components/RouteImport';
 import type { Position } from '@/lib/api';
+import { DEMO_MODE } from '@/lib/demoMode';
 
 const SAMPLE_ROUTE: { name: string; waypoints: Position[] } = {
   name: 'Rotterdam to Augusta',
@@ -161,13 +162,28 @@ export default function VoyageDropdown({ onFitRoute, onClose }: VoyageDropdownPr
           </div>
         ) : (
           <div className="space-y-2">
-            <RouteImport onImport={handleImport} />
-            <button
-              onClick={() => handleImport(SAMPLE_ROUTE.waypoints, SAMPLE_ROUTE.name)}
-              className="text-xs text-primary-400 hover:text-primary-300 underline"
-            >
-              Load sample route (Rotterdam — Augusta)
-            </button>
+            {DEMO_MODE ? (
+              <div className="flex flex-col items-center gap-2 py-3">
+                <p className="text-sm text-gray-400">Draw a route on the map</p>
+                <button
+                  onClick={handleDrawOnMap}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-primary-500/20 text-primary-400 hover:bg-primary-500/30 transition-colors"
+                >
+                  <PenLine className="w-4 h-4" />
+                  Draw on Map
+                </button>
+              </div>
+            ) : (
+              <>
+                <RouteImport onImport={handleImport} />
+                <button
+                  onClick={() => handleImport(SAMPLE_ROUTE.waypoints, SAMPLE_ROUTE.name)}
+                  className="text-xs text-primary-400 hover:text-primary-300 underline"
+                >
+                  Load sample route (Rotterdam — Augusta)
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>

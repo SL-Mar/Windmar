@@ -104,6 +104,9 @@ export interface MapComponentProps {
   extendedWeatherData?: any;
   fitBounds?: [[number, number], [number, number]] | null;
   fitKey?: number;
+  oceanMask?: boolean[][] | null;
+  oceanMaskLats?: number[] | null;
+  oceanMaskLons?: number[] | null;
   children?: React.ReactNode;
 }
 
@@ -139,6 +142,9 @@ export default function MapComponent({
   extendedWeatherData = null,
   fitBounds: fitBoundsProp = null,
   fitKey = 0,
+  oceanMask = null,
+  oceanMaskLats = null,
+  oceanMaskLons = null,
   children,
 }: MapComponentProps) {
   const [isMounted, setIsMounted] = useState(false);
@@ -243,6 +249,9 @@ export default function MapComponent({
           onWaypointsChange={onWaypointsChange}
           isEditing={isEditing}
           routeColor={routeVisibility?.original === false ? 'transparent' : undefined}
+          oceanMask={oceanMask}
+          oceanMaskLats={oceanMaskLats}
+          oceanMaskLons={oceanMaskLons}
         />
 
         {/* Optimized route overlays — dynamic loop over all 6 route keys */}
