@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Wind, Waves, Droplets, Clock, RefreshCw, Eye, EyeOff, Database, Snowflake, CloudFog, Thermometer, AudioWaveform } from 'lucide-react';
 import { WeatherLayer } from '@/components/MapComponent';
+import { DEMO_MODE } from '@/lib/demoMode';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -49,21 +50,25 @@ export default function MapOverlayControls({
     return () => clearInterval(interval);
   }, []);
 
-  const freshnessLabel = freshness
-    ? freshness.age_hours < 4
-      ? `${Math.round(freshness.age_hours)}h ago`
-      : freshness.age_hours < 12
+  const freshnessLabel = DEMO_MODE
+    ? 'Snapshot'
+    : freshness
+      ? freshness.age_hours < 4
         ? `${Math.round(freshness.age_hours)}h ago`
-        : 'stale'
-    : null;
+        : freshness.age_hours < 12
+          ? `${Math.round(freshness.age_hours)}h ago`
+          : 'stale'
+      : null;
 
-  const freshnessColor = freshness
-    ? freshness.age_hours < 4
-      ? 'text-green-400'
-      : freshness.age_hours < 12
-        ? 'text-yellow-400'
-        : 'text-red-400'
-    : 'text-gray-500';
+  const freshnessColor = DEMO_MODE
+    ? 'text-amber-400'
+    : freshness
+      ? freshness.age_hours < 4
+        ? 'text-green-400'
+        : freshness.age_hours < 12
+          ? 'text-yellow-400'
+          : 'text-red-400'
+      : 'text-gray-500';
 
   return (
     <div className="absolute top-3 right-3 z-[1000] flex flex-col gap-1.5">
