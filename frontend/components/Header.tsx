@@ -123,22 +123,24 @@ export default function Header({ onFitRoute }: HeaderProps) {
               )}
             </div>
 
-            {/* Regulations — dropdown */}
-            <div className="relative">
-              <button
-                onClick={() => toggle('regulations')}
-                className={`flex items-center space-x-1.5 px-3 py-2 rounded-lg transition-all ${
-                  openDropdown === 'regulations'
-                    ? 'text-primary-400 bg-primary-500/10'
-                    : 'text-gray-400 hover:text-white hover:bg-white/5'
-                }`}
-                title="Regulations"
-              >
-                <Shield className="w-5 h-5" />
-                <span className="text-sm font-medium hidden sm:inline">Regulations</span>
-              </button>
-              {openDropdown === 'regulations' && <RegulationsDropdown />}
-            </div>
+            {/* Regulations — dropdown (hidden in demo: zone data not loaded) */}
+            {!DEMO_MODE && (
+              <div className="relative">
+                <button
+                  onClick={() => toggle('regulations')}
+                  className={`flex items-center space-x-1.5 px-3 py-2 rounded-lg transition-all ${
+                    openDropdown === 'regulations'
+                      ? 'text-primary-400 bg-primary-500/10'
+                      : 'text-gray-400 hover:text-white hover:bg-white/5'
+                  }`}
+                  title="Regulations"
+                >
+                  <Shield className="w-5 h-5" />
+                  <span className="text-sm font-medium hidden sm:inline">Regulations</span>
+                </button>
+                {openDropdown === 'regulations' && <RegulationsDropdown />}
+              </div>
+            )}
 
             {/* Separator */}
             <div className="w-px h-6 bg-white/10 mx-2" />

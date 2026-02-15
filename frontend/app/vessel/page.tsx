@@ -15,6 +15,7 @@ import {
 } from '@/lib/api';
 import { formatFuel, formatPower } from '@/lib/utils';
 import { useVoyage } from '@/components/VoyageContext';
+import { DEMO_MODE } from '@/lib/demoMode';
 
 type VesselTab = 'specifications' | 'calibration' | 'fuel';
 
@@ -326,11 +327,12 @@ function CalibrationSection() {
           <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls" onChange={handleFileUpload} className="hidden" />
           <button
             onClick={() => fileInputRef.current?.click()}
-            disabled={loading}
-            className="w-full py-2 px-3 bg-maritime-dark border border-white/10 rounded text-sm text-gray-300 hover:text-white hover:border-primary-500/50 transition-colors flex items-center justify-center gap-2"
+            disabled={loading || DEMO_MODE}
+            title={DEMO_MODE ? 'This feature is disabled in demo mode.' : undefined}
+            className="w-full py-2 px-3 bg-maritime-dark border border-white/10 rounded text-sm text-gray-300 hover:text-white hover:border-primary-500/50 transition-colors flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-300 disabled:hover:border-white/10"
           >
             <FileSpreadsheet className="w-4 h-4" />
-            {loading ? 'Uploading...' : 'Upload Noon Reports (CSV/Excel)'}
+            {DEMO_MODE ? 'Upload disabled in demo' : loading ? 'Uploading...' : 'Upload Noon Reports (CSV/Excel)'}
           </button>
           <p className="text-xs text-gray-500">CSV or Excel with: date, latitude, longitude, speed, fuel_consumption</p>
         </div>
