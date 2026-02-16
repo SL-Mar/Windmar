@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Wind, Waves, Droplets, Clock, RefreshCw, Eye, EyeOff, Database, Snowflake, CloudFog, Thermometer, AudioWaveform } from 'lucide-react';
+import { Wind, Waves, Droplets, Clock, RefreshCw, Database, Snowflake, CloudFog, Thermometer, AudioWaveform, AlertTriangle } from 'lucide-react';
 import { WeatherLayer } from '@/components/MapComponent';
+import { WeatherSyncStatus } from '@/lib/api';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -12,7 +13,9 @@ interface MapOverlayControlsProps {
   forecastEnabled: boolean;
   onForecastToggle: () => void;
   isLoadingWeather: boolean;
-  onRefresh: () => void;
+  onResync: () => void;
+  syncStatus: WeatherSyncStatus | null;
+  resyncRunning: boolean;
 }
 
 interface FreshnessInfo {
@@ -26,7 +29,9 @@ export default function MapOverlayControls({
   forecastEnabled,
   onForecastToggle,
   isLoadingWeather,
-  onRefresh,
+  onResync,
+  syncStatus,
+  resyncRunning,
 }: MapOverlayControlsProps) {
   const [freshness, setFreshness] = useState<FreshnessInfo | null>(null);
 
@@ -64,6 +69,8 @@ export default function MapOverlayControls({
         ? 'text-yellow-400'
         : 'text-red-400'
     : 'text-gray-500';
+
+  const outOfSync = syncStatus && !syncStatus.in_sync;
 
   return (
     <div className="absolute top-3 right-3 z-[1000] flex flex-col gap-1.5">
@@ -118,13 +125,19 @@ export default function MapOverlayControls({
         />
       )}
       <button
-        onClick={onRefresh}
-        disabled={isLoadingWeather}
+        onClick={onResync}
+        disabled={isLoadingWeather || resyncRunning}
         className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs bg-maritime-dark/90 backdrop-blur-sm border border-white/10 text-gray-400 hover:text-white transition-colors disabled:opacity-50"
       >
-        <RefreshCw className={`w-3.5 h-3.5 ${isLoadingWeather ? 'animate-spin' : ''}`} />
-        <span>Refresh</span>
+        <RefreshCw className={`w-3.5 h-3.5 ${resyncRunning ? 'animate-spin' : ''}`} />
+        <span>{resyncRunning ? 'Resyncing...' : 'Resync'}</span>
       </button>
+      {outOfSync && !resyncRunning && (
+        <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs bg-orange-900/60 backdrop-blur-sm border border-orange-500/40 text-orange-300">
+          <AlertTriangle className="w-3 h-3" />
+          <span>Out of sync</span>
+        </div>
+      )}
       {freshnessLabel && (
         <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs bg-maritime-dark/90 backdrop-blur-sm border border-white/10 ${freshnessColor}`}>
           <Database className="w-3 h-3" />
@@ -157,11 +170,6 @@ function OverlayButton({
     >
       {icon}
       <span>{label}</span>
-      {active ? (
-        <Eye className="w-3 h-3 ml-auto" />
-      ) : (
-        <EyeOff className="w-3 h-3 ml-auto" />
-      )}
     </button>
   );
 }

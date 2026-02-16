@@ -417,6 +417,90 @@ class DbWeatherProvider:
         finally:
             conn.close()
 
+    def get_sst_from_db(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        time: Optional[datetime] = None,
+    ) -> Optional[WeatherData]:
+        """Load SST from DB, cropped to bbox. Returns None if unavailable."""
+        run_id = self._find_latest_run("cmems_sst")
+        if run_id is None:
+            return None
+
+        forecast_hour = 0
+        if time is not None:
+            forecast_hour = self._best_forecast_hour(run_id, time)
+
+        conn = self._get_conn()
+        try:
+            grid = self._load_grid(conn, run_id, forecast_hour, "sst")
+            if grid is None:
+                return None
+
+            lats, lons, sst_vals = grid
+            lats_c, lons_c, sst_crop = self._crop_grid(
+                lats, lons, sst_vals, lat_min, lat_max, lon_min, lon_max
+            )
+
+            return WeatherData(
+                parameter="sst",
+                time=datetime.utcnow(),
+                lats=lats_c,
+                lons=lons_c,
+                values=sst_crop,
+                unit="°C",
+            )
+        except Exception as e:
+            logger.error(f"Failed to load SST data from DB: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def get_visibility_from_db(
+        self,
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        time: Optional[datetime] = None,
+    ) -> Optional[WeatherData]:
+        """Load visibility from DB, cropped to bbox. Returns None if unavailable."""
+        run_id = self._find_latest_run("gfs_visibility")
+        if run_id is None:
+            return None
+
+        forecast_hour = 0
+        if time is not None:
+            forecast_hour = self._best_forecast_hour(run_id, time)
+
+        conn = self._get_conn()
+        try:
+            grid = self._load_grid(conn, run_id, forecast_hour, "visibility")
+            if grid is None:
+                return None
+
+            lats, lons, vis_vals = grid
+            lats_c, lons_c, vis_crop = self._crop_grid(
+                lats, lons, vis_vals, lat_min, lat_max, lon_min, lon_max
+            )
+
+            return WeatherData(
+                parameter="visibility",
+                time=datetime.utcnow(),
+                lats=lats_c,
+                lons=lons_c,
+                values=vis_crop,
+                unit="km",
+            )
+        except Exception as e:
+            logger.error(f"Failed to load visibility data from DB: {e}")
+            return None
+        finally:
+            conn.close()
+
     def get_available_wave_hours(self) -> tuple:
         """Return (run_time, [forecast_hours]) for the latest complete wave run."""
         run_id = self._find_latest_run("cmems_wave")
@@ -536,6 +620,124 @@ class DbWeatherProvider:
             return row[0], row[1] or []
         except Exception:
             return None, []
+        finally:
+            conn.close()
+
+    # Source definitions: key, label, expected frame count
+    SOURCE_DEFS = {
+        "gfs": {"label": "Wind", "expected_frames": 41},
+        "cmems_wave": {"label": "Waves", "expected_frames": 41},
+        "cmems_current": {"label": "Currents", "expected_frames": 41},
+        "cmems_ice": {"label": "Ice", "expected_frames": 10},
+        "cmems_sst": {"label": "SST", "expected_frames": 41},
+        "gfs_visibility": {"label": "Visibility", "expected_frames": 41},
+    }
+
+    def get_health(self, max_age_hours: float = 12.0) -> dict:
+        """Check health of all 6 weather sources in the database.
+
+        Returns a structured dict with per-source status and overall health.
+        "Complete" = frame count >= 75% of expected.
+        "Fresh" = age < max_age_hours.
+        "Healthy" = present AND complete AND fresh.
+        """
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            sources_status = {}
+
+            for source_key, sdef in self.SOURCE_DEFS.items():
+                cur.execute(
+                    """SELECT id, ingested_at, array_length(forecast_hours, 1) AS frame_count,
+                              lat_min, lat_max, lon_min, lon_max
+                       FROM weather_forecast_runs
+                       WHERE source = %s AND status = 'complete'
+                       ORDER BY array_length(forecast_hours, 1) DESC NULLS LAST,
+                                ingested_at DESC
+                       LIMIT 1""",
+                    (source_key,),
+                )
+                row = cur.fetchone()
+
+                if row is None:
+                    sources_status[source_key] = {
+                        "label": sdef["label"],
+                        "present": False,
+                        "complete": False,
+                        "fresh": False,
+                        "healthy": False,
+                        "frame_count": 0,
+                        "expected_frames": sdef["expected_frames"],
+                        "age_hours": None,
+                        "bounds": None,
+                    }
+                    continue
+
+                ingested_at = row["ingested_at"]
+                if ingested_at.tzinfo is None:
+                    ingested_at = ingested_at.replace(tzinfo=timezone.utc)
+                age_hours = (datetime.now(timezone.utc) - ingested_at).total_seconds() / 3600.0
+
+                frame_count = row["frame_count"] or 0
+                threshold = sdef["expected_frames"] * 0.75
+                is_complete = frame_count >= threshold
+                is_fresh = age_hours < max_age_hours
+
+                sources_status[source_key] = {
+                    "label": sdef["label"],
+                    "present": True,
+                    "complete": is_complete,
+                    "fresh": is_fresh,
+                    "healthy": is_complete and is_fresh,
+                    "frame_count": frame_count,
+                    "expected_frames": sdef["expected_frames"],
+                    "age_hours": round(age_hours, 1),
+                    "bounds": {
+                        "lat_min": float(row["lat_min"]),
+                        "lat_max": float(row["lat_max"]),
+                        "lon_min": float(row["lon_min"]),
+                        "lon_max": float(row["lon_max"]),
+                    },
+                }
+
+            all_healthy = all(s["healthy"] for s in sources_status.values())
+            db_bounds = self.get_db_bounds()
+
+            return {
+                "healthy": all_healthy,
+                "db_bounds": db_bounds,
+                "sources": sources_status,
+            }
+        except Exception as e:
+            logger.error(f"Failed to get health status: {e}")
+            return {"healthy": False, "db_bounds": None, "sources": {}, "error": str(e)}
+        finally:
+            conn.close()
+
+    def get_db_bounds(self) -> dict | None:
+        """Get the union bounding box across all complete runs.
+
+        Returns {"lat_min", "lat_max", "lon_min", "lon_max"} or None if no data.
+        """
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT MIN(lat_min), MAX(lat_max), MIN(lon_min), MAX(lon_max)
+                   FROM weather_forecast_runs
+                   WHERE status = 'complete'"""
+            )
+            row = cur.fetchone()
+            if row is None or row[0] is None:
+                return None
+            return {
+                "lat_min": float(row[0]),
+                "lat_max": float(row[1]),
+                "lon_min": float(row[2]),
+                "lon_max": float(row[3]),
+            }
+        except Exception:
+            return None
         finally:
             conn.close()
 

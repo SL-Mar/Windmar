@@ -6,7 +6,7 @@ import Header from '@/components/Header';
 import MapOverlayControls from '@/components/MapOverlayControls';
 import AnalysisPanel from '@/components/AnalysisPanel';
 import { useVoyage } from '@/components/VoyageContext';
-import { apiClient, Position, WindFieldData, WaveFieldData, VelocityData, OptimizationResponse, CreateZoneRequest, WaveForecastFrames, IceForecastFrames, SstForecastFrames, VisForecastFrames, OptimizedRouteKey, AllOptimizationResults, EMPTY_ALL_RESULTS } from '@/lib/api';
+import { apiClient, Position, WindFieldData, WaveFieldData, VelocityData, OptimizationResponse, CreateZoneRequest, WaveForecastFrames, IceForecastFrames, SstForecastFrames, VisForecastFrames, OptimizedRouteKey, AllOptimizationResults, EMPTY_ALL_RESULTS, WeatherSyncStatus } from '@/lib/api';
 import { getAnalyses, saveAnalysis, deleteAnalysis, updateAnalysisMonteCarlo, AnalysisEntry } from '@/lib/analysisStorage';
 import { debugLog } from '@/lib/debugLog';
 import DebugConsole from '@/components/DebugConsole';
@@ -39,6 +39,11 @@ export default function HomePage() {
   // Cache-first weather readiness gate
   const [weatherReady, setWeatherReady] = useState(false);
   const [weatherEnsuring, setWeatherEnsuring] = useState(false);
+
+  // Viewport sync status
+  const [syncStatus, setSyncStatus] = useState<WeatherSyncStatus | null>(null);
+  const [resyncRunning, setResyncRunning] = useState(false);
+  const syncCheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Weather visualization
   const [weatherLayer, setWeatherLayer] = useState<WeatherLayer>('none');
@@ -79,13 +84,28 @@ export default function HomePage() {
     setAnalyses(getAnalyses());
   }, []);
 
-  // Startup: ensure all weather sources are cached in DB
+  // Startup: health-check-based weather readiness
   useEffect(() => {
     let cancelled = false;
     const ensureWeather = async () => {
       setWeatherEnsuring(true);
-      debugLog('info', 'WEATHER', 'Ensuring all weather sources are cached in DB...');
+      debugLog('info', 'WEATHER', 'Checking weather health...');
       try {
+        const health = await apiClient.getWeatherHealth();
+        if (cancelled) return;
+
+        if (health.healthy) {
+          debugLog('info', 'WEATHER', 'All 6 sources healthy — ready immediately');
+          setWeatherReady(true);
+          setWeatherEnsuring(false);
+          return;
+        }
+
+        // Some sources unhealthy — fill gaps via ensure-all
+        const unhealthy = Object.entries(health.sources)
+          .filter(([, v]) => !v.healthy)
+          .map(([k]) => k);
+        debugLog('info', 'WEATHER', `Unhealthy sources: ${unhealthy.join(', ')} — fetching...`);
         const result = await apiClient.ensureAllWeatherData({
           lat_min: -85, lat_max: 85, lon_min: -179.75, lon_max: 179.75,
         });
@@ -95,8 +115,8 @@ export default function HomePage() {
         }
       } catch (error) {
         if (!cancelled) {
-          debugLog('warn', 'WEATHER', `ensure-all failed: ${error} — proceeding with full provider chain`);
-          setWeatherReady(true); // allow app to work even if ensure-all fails
+          debugLog('warn', 'WEATHER', `Health check / ensure-all failed: ${error} — proceeding anyway`);
+          setWeatherReady(true);
         }
       } finally {
         if (!cancelled) setWeatherEnsuring(false);
@@ -187,10 +207,8 @@ export default function HomePage() {
       resolution: getResolutionForZoom(v.zoom),
     };
 
-    // Clear stale extended data immediately when switching layers
-    if (activeLayer === 'ice' || activeLayer === 'visibility' || activeLayer === 'sst' || activeLayer === 'swell') {
-      setExtendedWeatherData(null);
-    }
+    // NOTE: Do NOT clear extended data here — keep old data visible
+    // while the new viewport's data loads (avoids 2-6s blank flash).
 
     setIsLoadingWeather(true);
     const t0 = performance.now();
@@ -226,15 +244,15 @@ export default function HomePage() {
         debugLog('info', 'API', `Ice loaded in ${dt}ms: grid=${data?.ny}x${data?.nx}`);
         if (data) setExtendedWeatherData(data);
       } else if (activeLayer === 'visibility') {
-        const data = await apiClient.getVisibilityField(params);
+        const data = await apiClient.getVisibilityField({ ...params, db_only: dbOnly }).then(orNull);
         const dt = (performance.now() - t0).toFixed(0);
         debugLog('info', 'API', `Visibility loaded in ${dt}ms: grid=${data?.ny}x${data?.nx}`);
-        setExtendedWeatherData(data);
+        if (data) setExtendedWeatherData(data);
       } else if (activeLayer === 'sst') {
-        const data = await apiClient.getSstField(params);
+        const data = await apiClient.getSstField({ ...params, db_only: dbOnly }).then(orNull);
         const dt = (performance.now() - t0).toFixed(0);
         debugLog('info', 'API', `SST loaded in ${dt}ms: grid=${data?.ny}x${data?.nx}`);
-        setExtendedWeatherData(data);
+        if (data) setExtendedWeatherData(data);
       } else if (activeLayer === 'swell') {
         const data = await apiClient.getSwellField(params);
         const dt = (performance.now() - t0).toFixed(0);
@@ -248,11 +266,19 @@ export default function HomePage() {
     }
   }, []);
 
-  // Reload weather when viewport changes (weather mode only — prevents pan-triggered loads in analysis)
+  // On viewport change: debounced sync-status check (no auto-fetch)
   useEffect(() => {
-    if (weatherReady && viewport && weatherLayer !== 'none' && viewMode === 'weather') {
-      loadWeatherData(viewport, weatherLayer);
-    }
+    if (!weatherReady || !viewport) return;
+    if (syncCheckTimerRef.current) clearTimeout(syncCheckTimerRef.current);
+    syncCheckTimerRef.current = setTimeout(async () => {
+      try {
+        const status = await apiClient.getWeatherSyncStatus(viewport.bounds);
+        setSyncStatus(status);
+      } catch {
+        // Silently ignore — badge just won't show
+      }
+    }, 600);
+    return () => { if (syncCheckTimerRef.current) clearTimeout(syncCheckTimerRef.current); };
   }, [viewport, weatherReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reload weather when layer changes (both modes — user explicitly toggled a layer)
@@ -889,18 +915,43 @@ export default function HomePage() {
               forecastEnabled={forecastEnabled}
               onForecastToggle={() => setForecastEnabled(!forecastEnabled)}
               isLoadingWeather={isLoadingWeather || weatherEnsuring}
-              onRefresh={async () => {
-                debugLog('info', 'WEATHER', 'Manual refresh: re-fetching all sources from external APIs...');
-                setWeatherEnsuring(true);
+              syncStatus={syncStatus}
+              resyncRunning={resyncRunning}
+              onResync={async () => {
+                debugLog('info', 'WEATHER', 'Resync: truncating DB + re-fetching all sources...');
+                setResyncRunning(true);
                 try {
                   const vp = viewportRef.current;
                   const bbox = vp ? vp.bounds : { lat_min: -85, lat_max: 85, lon_min: -179.75, lon_max: 179.75 };
-                  const result = await apiClient.ensureAllWeatherData({ ...bbox, force: true });
-                  debugLog('info', 'WEATHER', `Refresh done in ${result.elapsed_ms}ms: ${JSON.stringify(result.sources)}`);
+                  await apiClient.triggerWeatherResync(bbox);
+
+                  // Poll resync status every 3s until done
+                  const poll = async () => {
+                    for (let i = 0; i < 600; i++) { // max 30 min
+                      await new Promise(r => setTimeout(r, 3000));
+                      try {
+                        const status = await apiClient.getWeatherResyncStatus();
+                        if (!status.running) {
+                          debugLog('info', 'WEATHER', `Resync complete: phase=${status.phase}`);
+                          break;
+                        }
+                        debugLog('info', 'WEATHER', `Resync progress: ${status.phase} — ${(status.completed || []).join(', ')}`);
+                      } catch {
+                        break;
+                      }
+                    }
+                  };
+                  await poll();
+
+                  // Refresh sync status
+                  if (vp) {
+                    const newSync = await apiClient.getWeatherSyncStatus(vp.bounds).catch(() => null);
+                    if (newSync) setSyncStatus(newSync);
+                  }
                 } catch (error) {
-                  debugLog('error', 'WEATHER', `Refresh failed: ${error}`);
+                  debugLog('error', 'WEATHER', `Resync failed: ${error}`);
                 } finally {
-                  setWeatherEnsuring(false);
+                  setResyncRunning(false);
                 }
                 loadWeatherData();
               }}

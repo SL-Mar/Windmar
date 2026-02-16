@@ -37,11 +37,11 @@ class WeatherIngestionService:
         return psycopg2.connect(self.db_url)
 
     def ingest_all(self, force: bool = False):
-        """Run full ingestion cycle: wind + waves + currents + ice.
+        """Run full ingestion cycle: wind + waves + currents + ice + SST + visibility.
 
         Downloads GFS wind (41 forecast hours, ~2-3 min with rate limiting),
-        CMEMS waves, CMEMS currents, and CMEMS ice into PostgreSQL for
-        sub-second route optimization queries.
+        CMEMS waves, CMEMS currents, CMEMS ice, CMEMS SST, and GFS visibility
+        into PostgreSQL for sub-second route optimization queries.
 
         Args:
             force: If True, bypass freshness checks and re-ingest all sources.
@@ -51,6 +51,8 @@ class WeatherIngestionService:
         self.ingest_waves(force=force)
         self.ingest_currents(force=force)
         self.ingest_ice(force=force)
+        self.ingest_sst(force=force)
+        self.ingest_visibility(force=force)
         self._supersede_old_runs()
         logger.info("Weather ingestion cycle complete")
 
@@ -696,6 +698,222 @@ class WeatherIngestionService:
 
         except Exception as e:
             logger.error(f"Ice forecast frame ingestion failed: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+
+    def ingest_sst(self, force: bool = False):
+        """Fetch CMEMS SST forecast (0-120h, 3-hourly) and store in PostgreSQL.
+
+        Skips if a multi-timestep SST run already exists in the DB.
+        """
+        source = "cmems_sst"
+        if not force and self._has_multistep_run(source):
+            logger.debug("Skipping SST ingestion — multi-timestep run exists in DB")
+            return
+
+        logger.info("CMEMS SST forecast ingestion starting")
+        try:
+            result = self.copernicus_provider.fetch_sst_forecast(
+                self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
+            )
+            if not result:
+                logger.warning("CMEMS SST forecast fetch returned empty")
+                return
+            self.ingest_sst_forecast_frames(result)
+        except Exception as e:
+            logger.error(f"SST ingestion failed: {e}")
+
+    def ingest_visibility(self, force: bool = False):
+        """Fetch GFS visibility forecast (0-120h, 3-hourly) and store in PostgreSQL.
+
+        Skips if a multi-timestep visibility run already exists in the DB.
+        """
+        source = "gfs_visibility"
+        if not force and self._has_multistep_run(source):
+            logger.debug("Skipping visibility ingestion — multi-timestep run exists in DB")
+            return
+
+        logger.info("GFS visibility forecast ingestion starting")
+        try:
+            result = self.gfs_provider.fetch_visibility_forecast(
+                self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
+            )
+            if not result:
+                logger.warning("GFS visibility forecast fetch returned empty")
+                return
+            self.ingest_visibility_forecast_frames(result)
+        except Exception as e:
+            logger.error(f"Visibility ingestion failed: {e}")
+
+    def ingest_sst_forecast_frames(self, frames: dict):
+        """Store multi-timestep SST forecast frames into PostgreSQL.
+
+        Args:
+            frames: Dict mapping forecast_hour (int) -> WeatherData.
+                    Each WeatherData has sst or values field (°C).
+        """
+        if not frames:
+            return
+
+        source = "cmems_sst"
+        run_time = datetime.now(timezone.utc)
+        forecast_hours = sorted(frames.keys())
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+
+            # Supersede any existing complete SST runs
+            cur.execute(
+                """UPDATE weather_forecast_runs SET status = 'superseded'
+                   WHERE source = %s AND status = 'complete'""",
+                (source,),
+            )
+
+            cur.execute(
+                """INSERT INTO weather_forecast_runs
+                   (source, run_time, status, grid_resolution,
+                    lat_min, lat_max, lon_min, lon_max, forecast_hours)
+                   VALUES (%s, %s, 'ingesting', %s, %s, %s, %s, %s, %s)
+                   RETURNING id""",
+                (source, run_time, 0.083,
+                 self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
+                 forecast_hours),
+            )
+            run_id = cur.fetchone()[0]
+            conn.commit()
+
+            ingested_count = 0
+            for fh in forecast_hours:
+                wd = frames[fh]
+                try:
+                    lats_blob = self._compress(np.asarray(wd.lats))
+                    lons_blob = self._compress(np.asarray(wd.lons))
+                    rows = len(wd.lats)
+                    cols = len(wd.lons)
+
+                    arr = wd.sst if wd.sst is not None else wd.values
+                    if arr is None:
+                        continue
+                    cur.execute(
+                        """INSERT INTO weather_grid_data
+                           (run_id, forecast_hour, parameter, lats, lons, data, shape_rows, shape_cols)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                           ON CONFLICT (run_id, forecast_hour, parameter)
+                           DO UPDATE SET data = EXCLUDED.data,
+                                        lats = EXCLUDED.lats,
+                                        lons = EXCLUDED.lons,
+                                        shape_rows = EXCLUDED.shape_rows,
+                                        shape_cols = EXCLUDED.shape_cols""",
+                        (run_id, fh, "sst", lats_blob, lons_blob,
+                         self._compress(np.asarray(arr)), rows, cols),
+                    )
+
+                    ingested_count += 1
+                    conn.commit()
+                except Exception as e:
+                    logger.error(f"Failed to ingest SST forecast f{fh:03d}: {e}")
+                    conn.rollback()
+
+            status = "complete" if ingested_count > 0 else "failed"
+            cur.execute(
+                "UPDATE weather_forecast_runs SET status = %s WHERE id = %s",
+                (status, run_id),
+            )
+            conn.commit()
+            logger.info(
+                f"SST forecast DB ingestion {status}: "
+                f"{ingested_count}/{len(forecast_hours)} hours"
+            )
+
+        except Exception as e:
+            logger.error(f"SST forecast frame ingestion failed: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+
+    def ingest_visibility_forecast_frames(self, frames: dict):
+        """Store multi-timestep visibility forecast frames into PostgreSQL.
+
+        Args:
+            frames: Dict mapping forecast_hour (int) -> WeatherData.
+                    Each WeatherData has visibility or values field (km).
+        """
+        if not frames:
+            return
+
+        source = "gfs_visibility"
+        run_time = datetime.now(timezone.utc)
+        forecast_hours = sorted(frames.keys())
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+
+            # Supersede any existing complete visibility runs
+            cur.execute(
+                """UPDATE weather_forecast_runs SET status = 'superseded'
+                   WHERE source = %s AND status = 'complete'""",
+                (source,),
+            )
+
+            cur.execute(
+                """INSERT INTO weather_forecast_runs
+                   (source, run_time, status, grid_resolution,
+                    lat_min, lat_max, lon_min, lon_max, forecast_hours)
+                   VALUES (%s, %s, 'ingesting', %s, %s, %s, %s, %s, %s)
+                   RETURNING id""",
+                (source, run_time, self.GRID_RESOLUTION,
+                 self.LAT_MIN, self.LAT_MAX, self.LON_MIN, self.LON_MAX,
+                 forecast_hours),
+            )
+            run_id = cur.fetchone()[0]
+            conn.commit()
+
+            ingested_count = 0
+            for fh in forecast_hours:
+                wd = frames[fh]
+                try:
+                    lats_blob = self._compress(np.asarray(wd.lats))
+                    lons_blob = self._compress(np.asarray(wd.lons))
+                    rows = len(wd.lats)
+                    cols = len(wd.lons)
+
+                    arr = wd.visibility if wd.visibility is not None else wd.values
+                    if arr is None:
+                        continue
+                    cur.execute(
+                        """INSERT INTO weather_grid_data
+                           (run_id, forecast_hour, parameter, lats, lons, data, shape_rows, shape_cols)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                           ON CONFLICT (run_id, forecast_hour, parameter)
+                           DO UPDATE SET data = EXCLUDED.data,
+                                        lats = EXCLUDED.lats,
+                                        lons = EXCLUDED.lons,
+                                        shape_rows = EXCLUDED.shape_rows,
+                                        shape_cols = EXCLUDED.shape_cols""",
+                        (run_id, fh, "visibility", lats_blob, lons_blob,
+                         self._compress(np.asarray(arr)), rows, cols),
+                    )
+
+                    ingested_count += 1
+                    conn.commit()
+                except Exception as e:
+                    logger.error(f"Failed to ingest visibility forecast f{fh:03d}: {e}")
+                    conn.rollback()
+
+            status = "complete" if ingested_count > 0 else "failed"
+            cur.execute(
+                "UPDATE weather_forecast_runs SET status = %s WHERE id = %s",
+                (status, run_id),
+            )
+            conn.commit()
+            logger.info(
+                f"Visibility forecast DB ingestion {status}: "
+                f"{ingested_count}/{len(forecast_hours)} hours"
+            )
+
+        except Exception as e:
+            logger.error(f"Visibility forecast frame ingestion failed: {e}")
             conn.rollback()
         finally:
             conn.close()

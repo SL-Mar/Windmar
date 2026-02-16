@@ -294,6 +294,39 @@ export interface ForecastFrames {
   frames: Record<string, VelocityData[]>;
 }
 
+// Weather health/sync types
+export interface WeatherSourceHealth {
+  label: string;
+  present: boolean;
+  complete: boolean;
+  fresh: boolean;
+  healthy: boolean;
+  frame_count: number;
+  expected_frames: number;
+  age_hours: number | null;
+  bounds: { lat_min: number; lat_max: number; lon_min: number; lon_max: number } | null;
+}
+
+export interface WeatherHealthResponse {
+  healthy: boolean;
+  db_bounds: { lat_min: number; lat_max: number; lon_min: number; lon_max: number } | null;
+  sources: Record<string, WeatherSourceHealth>;
+}
+
+export interface WeatherSyncStatus {
+  in_sync: boolean;
+  coverage: 'full' | 'partial' | 'none';
+  db_bounds: { lat_min: number; lat_max: number; lon_min: number; lon_max: number } | null;
+}
+
+export interface WeatherResyncStatus {
+  running: boolean;
+  phase?: string;
+  current_source?: string | null;
+  completed?: string[];
+  total?: number;
+}
+
 // Voyage types
 export interface VoyageRequest {
   waypoints: Position[];
@@ -1111,12 +1144,12 @@ export const apiClient = {
   },
 
   // Extended weather fields (SPEC-P1)
-  async getSstField(params: { lat_min?: number; lat_max?: number; lon_min?: number; lon_max?: number; resolution?: number } = {}): Promise<GridFieldData> {
+  async getSstField(params: { lat_min?: number; lat_max?: number; lon_min?: number; lon_max?: number; resolution?: number; db_only?: boolean } = {}): Promise<GridFieldData> {
     const response = await api.get<GridFieldData>('/api/weather/sst', { params });
     return response.data;
   },
 
-  async getVisibilityField(params: { lat_min?: number; lat_max?: number; lon_min?: number; lon_max?: number; resolution?: number } = {}): Promise<GridFieldData> {
+  async getVisibilityField(params: { lat_min?: number; lat_max?: number; lon_min?: number; lon_max?: number; resolution?: number; db_only?: boolean } = {}): Promise<GridFieldData> {
     const response = await api.get<GridFieldData>('/api/weather/visibility', { params });
     return response.data;
   },
@@ -1138,6 +1171,26 @@ export const apiClient = {
 
   async getSwellField(params: { lat_min?: number; lat_max?: number; lon_min?: number; lon_max?: number; resolution?: number } = {}): Promise<SwellFieldData> {
     const response = await api.get<SwellFieldData>('/api/weather/swell', { params });
+    return response.data;
+  },
+
+  async getWeatherHealth(): Promise<WeatherHealthResponse> {
+    const response = await api.get<WeatherHealthResponse>('/api/weather/health');
+    return response.data;
+  },
+
+  async getWeatherSyncStatus(params: { lat_min: number; lat_max: number; lon_min: number; lon_max: number }): Promise<WeatherSyncStatus> {
+    const response = await api.get<WeatherSyncStatus>('/api/weather/sync-status', { params });
+    return response.data;
+  },
+
+  async triggerWeatherResync(params: { lat_min: number; lat_max: number; lon_min: number; lon_max: number }): Promise<{ status: string; message: string }> {
+    const response = await api.post('/api/weather/resync', null, { params, timeout: 300000 });
+    return response.data;
+  },
+
+  async getWeatherResyncStatus(): Promise<WeatherResyncStatus> {
+    const response = await api.get<WeatherResyncStatus>('/api/weather/resync/status');
     return response.data;
   },
 
