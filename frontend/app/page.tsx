@@ -83,83 +83,102 @@ export default function HomePage() {
     setAnalyses(getAnalyses());
   }, []);
 
-  // Startup: health-check-based weather readiness
+  // Startup gate: single entry point for weather readiness.
+  // 1. Check health — if all sources healthy, ready immediately.
+  // 2. If some missing, call ensure-all (no force) to fetch only gaps.
+  // 3. Poll health until all sources healthy (max 2 min).
+  // 4. Set weatherReady + sync badge + freshness toast.
+  // No force: existing stale data is still served while new data arrives.
   useEffect(() => {
     let cancelled = false;
-    const ensureWeather = async () => {
+    const startup = async () => {
       setWeatherEnsuring(true);
-      debugLog('info', 'WEATHER', 'Checking weather health...');
+      debugLog('info', 'WEATHER', 'Startup: checking weather health...');
       try {
         const health = await apiClient.getWeatherHealth();
         if (cancelled) return;
 
         if (health.healthy) {
-          debugLog('info', 'WEATHER', 'All 6 sources healthy — ready immediately');
+          debugLog('info', 'WEATHER', 'All sources healthy — ready immediately');
           setWeatherReady(true);
           setWeatherEnsuring(false);
+          // Set sync badge
+          setSyncStatus({ in_sync: true, coverage: 'full', db_bounds: null });
+          // Show freshness toast
+          showFreshnessToast();
           return;
         }
 
-        // Some sources unhealthy — fill gaps via ensure-all
+        // Some sources missing/stale — fetch only gaps (no force)
         const unhealthy = Object.entries(health.sources)
           .filter(([, v]) => !v.healthy)
           .map(([k]) => k);
-        debugLog('info', 'WEATHER', `Unhealthy sources: ${unhealthy.join(', ')} — fetching...`);
-        const result = await apiClient.ensureAllWeatherData({
+        debugLog('info', 'WEATHER', `Unhealthy: ${unhealthy.join(', ')} — fetching missing...`);
+
+        await apiClient.ensureAllWeatherData({
           lat_min: -85, lat_max: 85, lon_min: -179.75, lon_max: 179.75,
         });
+
+        // Poll health until all healthy or timeout (2 min, every 5s)
+        let allHealthy = false;
+        for (let i = 0; i < 24; i++) {
+          if (cancelled) return;
+          await new Promise(r => setTimeout(r, 5000));
+          try {
+            const h = await apiClient.getWeatherHealth();
+            if (h.healthy) {
+              debugLog('info', 'WEATHER', `All sources healthy after ${(i + 1) * 5}s`);
+              allHealthy = true;
+              break;
+            }
+            debugLog('info', 'WEATHER', `Waiting for sources... (${i + 1}/24)`);
+          } catch { break; }
+        }
+
         if (!cancelled) {
-          debugLog('info', 'WEATHER', `ensure-all done in ${result.elapsed_ms}ms: ${JSON.stringify(result.sources)}`);
           setWeatherReady(true);
+          setSyncStatus({
+            in_sync: allHealthy,
+            coverage: allHealthy ? 'full' : 'partial',
+            db_bounds: null,
+          });
+          showFreshnessToast();
         }
       } catch (error) {
         if (!cancelled) {
-          debugLog('warn', 'WEATHER', `Health check / ensure-all failed: ${error} — proceeding anyway`);
+          debugLog('warn', 'WEATHER', `Startup failed: ${error} — proceeding with existing data`);
           setWeatherReady(true);
+          setSyncStatus({ in_sync: false, coverage: 'none', db_bounds: null });
         }
       } finally {
         if (!cancelled) setWeatherEnsuring(false);
       }
     };
-    ensureWeather();
-    return () => { cancelled = true; };
-  }, []);
 
-  // Startup freshness check: after weather data is ready, show data age toast
-  useEffect(() => {
-    if (!weatherReady) return;
-    let cancelled = false;
-    const checkFreshness = async () => {
+    // Freshness toast — informational only, never triggers fetching
+    const showFreshnessToast = async () => {
       try {
         const freshness = await apiClient.getWeatherFreshness();
-        if (cancelled) return;
-
         if (freshness.status === 'no_data' || freshness.status === 'unavailable') {
-          toast.error('No weather data available', 'Downloading fresh data...');
-          apiClient.ensureAllWeatherData({ force: true }).catch(() => {});
+          toast.error('No weather data available', 'Use the resync button to download.');
           return;
         }
-
         const ageHours = freshness.age_hours;
         if (ageHours === null) return;
-
         if (ageHours < 4) {
           const ageMin = Math.round(ageHours * 60);
-          toast.info('Weather data is current', `Updated ${ageMin < 60 ? `${ageMin} minutes` : `${ageHours.toFixed(1)}h`} ago`);
+          toast.info('Weather data is current', `Updated ${ageMin < 60 ? `${ageMin} min` : `${ageHours.toFixed(1)}h`} ago`);
         } else if (ageHours < 12) {
-          toast.warning('Weather data is aging', `Data is ${ageHours.toFixed(1)}h old. Refreshing...`);
-          apiClient.ensureAllWeatherData({ force: true }).catch(() => {});
+          toast.warning('Weather data is aging', `Data is ${ageHours.toFixed(1)}h old. Use resync to refresh.`);
         } else {
-          toast.error('Weather data is stale', `Data is ${ageHours.toFixed(1)}h old. Refreshing...`);
-          apiClient.ensureAllWeatherData({ force: true }).catch(() => {});
+          toast.error('Weather data is stale', `Data is ${ageHours.toFixed(1)}h old. Use resync to refresh.`);
         }
-      } catch (error) {
-        debugLog('warn', 'FRESHNESS', `Freshness check failed: ${error}`);
-      }
+      } catch { /* ignore */ }
     };
-    checkFreshness();
+
+    startup();
     return () => { cancelled = true; };
-  }, [weatherReady]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Compute visible zone types from context
   const visibleZoneTypes = useMemo(() => {
@@ -264,61 +283,6 @@ export default function HomePage() {
       setIsLoadingWeather(false);
     }
   }, []);
-
-  // Startup sync: check health and auto-fix if not in sync.
-  // Forces ensure-all + polls health until sources are healthy (max 2 min).
-  useEffect(() => {
-    if (!weatherReady) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const status = await apiClient.getWeatherSyncStatus(
-          { lat_min: -85, lat_max: 85, lon_min: -180, lon_max: 180 }
-        );
-        if (cancelled) return;
-        setSyncStatus(status);
-
-        if (status.in_sync) return;
-
-        // Not in sync — force-refresh stale/missing sources
-        debugLog('info', 'WEATHER', 'Startup: not in sync — forcing ensure-all...');
-        setResyncRunning(true);
-        try {
-          await apiClient.ensureAllWeatherData({
-            lat_min: -85, lat_max: 85, lon_min: -179.75, lon_max: 179.75,
-            force: true,
-          });
-
-          // Poll health until all sources healthy (max 2 min, every 5s)
-          for (let i = 0; i < 24; i++) {
-            if (cancelled) return;
-            await new Promise(r => setTimeout(r, 5000));
-            try {
-              const health = await apiClient.getWeatherHealth();
-              if (health.healthy) {
-                debugLog('info', 'WEATHER', 'Startup auto-sync complete: all sources healthy');
-                break;
-              }
-              debugLog('info', 'WEATHER', `Startup auto-sync: waiting for sources... (${i + 1}/24)`);
-            } catch { break; }
-          }
-
-          const newSync = await apiClient.getWeatherSyncStatus(
-            { lat_min: -85, lat_max: 85, lon_min: -180, lon_max: 180 }
-          );
-          if (!cancelled) {
-            setSyncStatus(newSync);
-            loadWeatherData(); // reload active layer with fresh data
-          }
-        } finally {
-          if (!cancelled) setResyncRunning(false);
-        }
-      } catch {
-        // Silently ignore — badge just won't show
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [weatherReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reload weather when layer changes (both modes — user explicitly toggled a layer)
   useEffect(() => {
@@ -982,11 +946,15 @@ export default function HomePage() {
                   };
                   await poll();
 
-                  // Refresh sync status (health-based, viewport-independent)
-                  const newSync = await apiClient.getWeatherSyncStatus(
-                    vp?.bounds ?? { lat_min: -85, lat_max: 85, lon_min: -180, lon_max: 180 }
-                  ).catch(() => null);
-                  if (newSync) setSyncStatus(newSync);
+                  // Refresh sync badge (health-based)
+                  const health = await apiClient.getWeatherHealth().catch(() => null);
+                  if (health) {
+                    setSyncStatus({
+                      in_sync: health.healthy,
+                      coverage: health.healthy ? 'full' : 'partial',
+                      db_bounds: health.db_bounds,
+                    });
+                  }
                 } catch (error) {
                   debugLog('error', 'WEATHER', `Resync failed: ${error}`);
                 } finally {

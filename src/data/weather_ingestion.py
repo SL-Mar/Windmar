@@ -230,10 +230,10 @@ class WeatherIngestionService:
             logger.debug("Skipping wave ingestion — multi-timestep run exists in DB")
             return
 
-        _lat_min = lat_min if lat_min is not None else self.LAT_MIN
-        _lat_max = lat_max if lat_max is not None else self.LAT_MAX
-        _lon_min = lon_min if lon_min is not None else self.LON_MIN
-        _lon_max = lon_max if lon_max is not None else self.LON_MAX
+        _lat_min = lat_min if lat_min is not None else self.CMEMS_DEFAULT_LAT_MIN
+        _lat_max = lat_max if lat_max is not None else self.CMEMS_DEFAULT_LAT_MAX
+        _lon_min = lon_min if lon_min is not None else self.CMEMS_DEFAULT_LON_MIN
+        _lon_max = lon_max if lon_max is not None else self.CMEMS_DEFAULT_LON_MAX
 
         logger.info("CMEMS wave forecast ingestion starting")
         try:
@@ -264,10 +264,10 @@ class WeatherIngestionService:
             logger.debug("Skipping current ingestion — multi-timestep run exists in DB")
             return
 
-        _lat_min = lat_min if lat_min is not None else self.LAT_MIN
-        _lat_max = lat_max if lat_max is not None else self.LAT_MAX
-        _lon_min = lon_min if lon_min is not None else self.LON_MIN
-        _lon_max = lon_max if lon_max is not None else self.LON_MAX
+        _lat_min = lat_min if lat_min is not None else self.CMEMS_DEFAULT_LAT_MIN
+        _lat_max = lat_max if lat_max is not None else self.CMEMS_DEFAULT_LAT_MAX
+        _lon_min = lon_min if lon_min is not None else self.CMEMS_DEFAULT_LON_MIN
+        _lon_max = lon_max if lon_max is not None else self.CMEMS_DEFAULT_LON_MAX
 
         logger.info("CMEMS current forecast ingestion starting")
         try:
@@ -298,10 +298,10 @@ class WeatherIngestionService:
             logger.debug("Skipping ice ingestion — multi-timestep run exists in DB")
             return
 
-        _lat_min = lat_min if lat_min is not None else self.LAT_MIN
-        _lat_max = lat_max if lat_max is not None else self.LAT_MAX
-        _lon_min = lon_min if lon_min is not None else self.LON_MIN
-        _lon_max = lon_max if lon_max is not None else self.LON_MAX
+        _lat_min = lat_min if lat_min is not None else self.ICE_DEFAULT_LAT_MIN
+        _lat_max = lat_max if lat_max is not None else self.ICE_DEFAULT_LAT_MAX
+        _lon_min = lon_min if lon_min is not None else self.ICE_DEFAULT_LON_MIN
+        _lon_max = lon_max if lon_max is not None else self.ICE_DEFAULT_LON_MAX
 
         logger.info("CMEMS ice forecast ingestion starting")
         try:

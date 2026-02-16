@@ -1390,7 +1390,9 @@ async def api_ensure_all_weather(req: EnsureAllRequest):
             cmems_to_fetch.append((label, source))
             result[label] = "fetching"
 
-    # Launch CMEMS multi-timestep ingestion in background
+    # Launch CMEMS multi-timestep ingestion in background.
+    # CMEMS sources use their own regional defaults (not the global bounds
+    # from the request) — global CMEMS downloads are too large and time out.
     if cmems_to_fetch:
         async def _bg_cmems():
             global _ingestion_running
@@ -1401,17 +1403,14 @@ async def api_ensure_all_weather(req: EnsureAllRequest):
                         if source == "cmems_wave":
                             await asyncio.to_thread(
                                 weather_ingestion.ingest_waves, req.force,
-                                req.lat_min, req.lat_max, req.lon_min, req.lon_max,
                             )
                         elif source == "cmems_current":
                             await asyncio.to_thread(
                                 weather_ingestion.ingest_currents, req.force,
-                                req.lat_min, req.lat_max, req.lon_min, req.lon_max,
                             )
                         elif source == "cmems_ice":
                             await asyncio.to_thread(
                                 weather_ingestion.ingest_ice, req.force,
-                                req.lat_min, req.lat_max, req.lon_min, req.lon_max,
                             )
                         logger.info(f"ensure-all background: {label} complete")
                     except Exception as e:
