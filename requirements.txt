@@ -24,6 +24,7 @@ cdsapi>=0.7.0
 copernicusmarine>=2.0.0
 xarray>=2024.1.0
 netcdf4>=1.6.0
+h5py>=3.10.0
 
 # GFS GRIB2 file parsing (requires libeccodes runtime)
 pygrib>=2.1.0

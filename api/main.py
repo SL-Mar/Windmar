@@ -5590,6 +5590,7 @@ async def _ingestion_loop():
                             except Exception as e:
                                 logger.error(f"Selective ingestion {src} failed: {e}")
                     weather_ingestion._supersede_old_runs()
+                    weather_ingestion.cleanup_orphaned_grid_data()
                     logger.info("Selective weather ingestion complete")
             else:
                 logger.info("Background weather ingestion starting (full)")

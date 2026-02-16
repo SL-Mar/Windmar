@@ -1002,6 +1002,10 @@ class CopernicusDataProvider:
             logger.warning("CMEMS API not available for SST forecast")
             return None
 
+        if not self.cmems_username or not self.cmems_password:
+            logger.warning("CMEMS credentials not configured for SST forecast")
+            return None
+
         import copernicusmarine
         import xarray as xr
 
@@ -1030,31 +1034,58 @@ class CopernicusDataProvider:
                 ds = None
 
             if ds is None:
-                logger.info(f"Downloading CMEMS SST forecast {start_dt} -> {end_dt}")
-                ds = _retry_download(lambda: copernicusmarine.open_dataset(
-                    dataset_id=self.CMEMS_PHYSICS_DATASET,
-                    variables=["thetao"],
-                    minimum_longitude=lon_min,
-                    maximum_longitude=lon_max,
-                    minimum_latitude=lat_min,
-                    maximum_latitude=lat_max,
-                    start_datetime=start_dt.strftime("%Y-%m-%dT%H:%M:%S"),
-                    end_datetime=end_dt.strftime("%Y-%m-%dT%H:%M:%S"),
-                    minimum_depth=0,
-                    maximum_depth=2,
-                    username=self.cmems_username,
-                    password=self.cmems_password,
-                ))
-                if ds is None:
-                    logger.error("CMEMS returned None for SST forecast")
+                # Use copernicusmarine.subset() to download a pre-subsetted file
+                # instead of open_dataset() which lazily streams the full grid.
+                # This avoids OOM on global 0.083 deg SST (~3 GB in float64).
+                import tempfile
+                tmp_nc = tempfile.NamedTemporaryFile(suffix=".nc", delete=False, dir=str(self.cache_dir))
+                tmp_path = tmp_nc.name
+                tmp_nc.close()
+
+                logger.info(f"Downloading CMEMS SST forecast (subset) {start_dt} -> {end_dt}")
+                try:
+                    copernicusmarine.subset(
+                        dataset_id=self.CMEMS_PHYSICS_DATASET,
+                        variables=["thetao"],
+                        minimum_longitude=max(lon_min, -180),
+                        maximum_longitude=min(lon_max, 180),
+                        minimum_latitude=max(lat_min, -80),
+                        maximum_latitude=min(lat_max, 80),
+                        start_datetime=start_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                        end_datetime=end_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                        minimum_depth=0,
+                        maximum_depth=2,
+                        username=self.cmems_username,
+                        password=self.cmems_password,
+                        output_filename=tmp_path,
+                        overwrite=True,
+                    )
+                except Exception as e:
+                    logger.error(f"CMEMS SST subset download failed: {e}")
+                    import os
+                    os.unlink(tmp_path) if os.path.exists(tmp_path) else None
                     return None
-                logger.info("Loading SST forecast data into memory...")
-                ds = ds.load()
+
+                import os
+                if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) < 100_000:
+                    logger.warning("SST subset download produced empty or tiny file")
+                    os.unlink(tmp_path) if os.path.exists(tmp_path) else None
+                    return None
+
+                logger.info("Loading SST forecast subset into memory...")
+                ds = xr.open_dataset(tmp_path)
+                # Subsample to ~0.5 deg for manageable DB storage
+                step = max(1, round(0.5 / 0.083))  # 6x coarsen
+                ds = ds.isel(
+                    latitude=slice(None, None, step),
+                    longitude=slice(None, None, step),
+                ).load()
                 ds.to_netcdf(cache_file)
                 ds.close()
-                logger.info(f"SST forecast cached: {cache_file}")
+                os.unlink(tmp_path)
+                logger.info(f"SST forecast cached (subsampled {step}x): {cache_file}")
                 fsize = cache_file.stat().st_size
-                if fsize < 500_000:
+                if fsize < 50_000:
                     logger.warning(f"SST forecast cache suspiciously small ({fsize} bytes), deleting")
                     cache_file.unlink(missing_ok=True)
                     return None

@@ -54,6 +54,7 @@ class WeatherIngestionService:
         self.ingest_sst(force=force)
         self.ingest_visibility(force=force)
         self._supersede_old_runs()
+        self.cleanup_orphaned_grid_data()
         logger.info("Weather ingestion cycle complete")
 
     def ingest_wind(self, force: bool = False):
@@ -941,6 +942,72 @@ class WeatherIngestionService:
                 logger.info(f"Superseded {superseded} old weather runs")
         except Exception as e:
             logger.error(f"Failed to supersede old runs: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+
+    def cleanup_orphaned_grid_data(self):
+        """Delete grid data rows belonging to superseded, failed, or stale ingesting runs.
+
+        This reclaims TOAST storage from dead runs. Should be called after
+        _supersede_old_runs() in each ingestion cycle.
+
+        Note: PostgreSQL does not release disk space from TOAST deletes until
+        autovacuum runs (or manual VACUUM). Large deletes may cause temporary
+        I/O spikes.
+        """
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            # Delete grid data for superseded and failed runs
+            cur.execute(
+                """DELETE FROM weather_grid_data
+                   WHERE run_id IN (
+                       SELECT id FROM weather_forecast_runs
+                       WHERE status IN ('superseded', 'failed')
+                   )"""
+            )
+            deleted_dead = cur.rowcount
+
+            # Delete grid data for ingesting runs older than 6h (stale/abandoned)
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=6)
+            cur.execute(
+                """DELETE FROM weather_grid_data
+                   WHERE run_id IN (
+                       SELECT id FROM weather_forecast_runs
+                       WHERE status = 'ingesting'
+                         AND ingested_at < %s
+                   )""",
+                (cutoff,),
+            )
+            deleted_stale = cur.rowcount
+
+            # Now delete the orphaned run metadata too
+            cur.execute(
+                """DELETE FROM weather_forecast_runs
+                   WHERE status IN ('superseded', 'failed')"""
+            )
+            deleted_runs_dead = cur.rowcount
+
+            cur.execute(
+                """DELETE FROM weather_forecast_runs
+                   WHERE status = 'ingesting'
+                     AND ingested_at < %s""",
+                (cutoff,),
+            )
+            deleted_runs_stale = cur.rowcount
+
+            conn.commit()
+            total_grids = deleted_dead + deleted_stale
+            total_runs = deleted_runs_dead + deleted_runs_stale
+            if total_grids > 0 or total_runs > 0:
+                logger.info(
+                    f"Orphan cleanup: deleted {total_grids} grid rows "
+                    f"and {total_runs} run records "
+                    f"(superseded/failed={deleted_dead}, stale_ingesting={deleted_stale})"
+                )
+        except Exception as e:
+            logger.error(f"Failed to clean up orphaned grid data: {e}")
             conn.rollback()
         finally:
             conn.close()
