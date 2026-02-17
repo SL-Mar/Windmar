@@ -5495,16 +5495,27 @@ async def get_fuel_scenarios():
 
 
 class PerformancePredictionRequest(BaseModel):
-    """Request for vessel performance prediction under given conditions."""
+    """Request for vessel performance prediction under given conditions.
+
+    Two modes:
+    - engine_load_pct set: find achievable speed at this power
+    - calm_speed_kts set: find required power to maintain this calm-water
+      speed through the given weather (speed may drop if MCR exceeded)
+
+    All directions are RELATIVE to the vessel bow:
+    0° = dead ahead (head wind / head seas / head current)
+    90° = beam (port or starboard)
+    180° = dead astern (following wind / following seas / following current)
+    """
     is_laden: bool = True
-    engine_load_pct: float = Field(85.0, ge=15, le=100, description="Engine load as % of MCR")
-    heading_deg: float = Field(0.0, ge=0, le=360, description="Vessel heading (degrees)")
+    engine_load_pct: Optional[float] = Field(None, ge=15, le=100, description="Engine load as % of MCR (mode 1)")
+    calm_speed_kts: Optional[float] = Field(None, gt=0, lt=25, description="Target calm-water speed in knots (mode 2)")
     wind_speed_kts: float = Field(0.0, ge=0, le=100, description="True wind speed (knots)")
-    wind_dir_deg: float = Field(0.0, ge=0, le=360, description="True wind direction (from, degrees)")
+    wind_relative_deg: float = Field(0.0, ge=0, le=180, description="Wind relative to bow: 0=ahead, 90=beam, 180=astern")
     wave_height_m: float = Field(0.0, ge=0, le=15, description="Significant wave height (m)")
-    wave_dir_deg: float = Field(0.0, ge=0, le=360, description="Wave direction (from, degrees)")
+    wave_relative_deg: float = Field(0.0, ge=0, le=180, description="Waves relative to bow: 0=head seas, 90=beam, 180=following")
     current_speed_kts: float = Field(0.0, ge=0, le=10, description="Current speed (knots)")
-    current_dir_deg: float = Field(0.0, ge=0, le=360, description="Current direction (flowing toward, degrees)")
+    current_relative_deg: float = Field(0.0, ge=0, le=180, description="Current relative to bow: 0=head current, 180=following")
 
 
 @app.post("/api/vessel/predict", tags=["Vessel"])
@@ -5512,33 +5523,114 @@ async def predict_vessel_performance(req: PerformancePredictionRequest):
     """
     Predict vessel speed and fuel consumption under given conditions.
 
-    Solves the inverse problem: for a given engine load and weather, what
-    speed will the vessel achieve and how much fuel will it burn?
+    Two modes:
+    - **engine_load_pct**: Find achievable speed at given power + weather
+    - **calm_speed_kts**: Find what happens to a target speed in weather
+      (power required, actual STW if MCR exceeded, fuel burn)
 
-    Returns STW, SOG (after current), fuel/day, fuel/nm, SFOC, resistance
-    breakdown, and speed loss from weather.
+    All directions are relative to bow (0=ahead, 90=beam, 180=astern).
     """
     model = current_vessel_model
+
+    # Convert relative directions to absolute with heading=0
+    heading = 0.0
+    wind_abs = req.wind_relative_deg
+    wave_abs = req.wave_relative_deg
 
     weather = None
     if req.wind_speed_kts > 0 or req.wave_height_m > 0:
         weather = {
             "wind_speed_ms": req.wind_speed_kts * 0.51444,
-            "wind_dir_deg": req.wind_dir_deg,
+            "wind_dir_deg": wind_abs,
             "sig_wave_height_m": req.wave_height_m,
-            "wave_dir_deg": req.wave_dir_deg,
+            "wave_dir_deg": wave_abs,
         }
 
     current_ms = req.current_speed_kts * 0.51444
+    # Current: relative 0° = head current (opposing) → flowing toward 180°
+    current_abs = (180.0 + req.current_relative_deg) % 360
+
+    # Mode 2: calm_speed_kts — calculate fuel at this speed in given weather
+    if req.calm_speed_kts is not None:
+        stw = req.calm_speed_kts
+        distance_24h = stw * 24
+        r = model.calculate_fuel_consumption(stw, req.is_laden, weather, distance_nm=distance_24h)
+
+        # Check if MCR is exceeded
+        mcr_exceeded = bool(r["required_power_kw"] > model.specs.mcr_kw)
+        required_power_raw = float(r["required_power_kw"])
+        actual_load_pct = float(min(r["required_power_kw"], model.specs.mcr_kw) / model.specs.mcr_kw * 100)
+        sfoc = float(model._sfoc_curve(actual_load_pct / 100))
+
+        # If MCR exceeded, find achievable speed at 100% MCR
+        if mcr_exceeded:
+            capped = model.predict_performance(
+                is_laden=req.is_laden, weather=weather, engine_load_pct=100.0,
+                current_speed_ms=current_ms, current_dir_deg=current_abs, heading_deg=heading,
+            )
+            stw = capped["stw_kts"]
+            # Recalculate at capped speed
+            r = model.calculate_fuel_consumption(stw, req.is_laden, weather, distance_nm=stw * 24)
+
+        # Current effect
+        import math as _math
+        current_effect_kts = 0.0
+        if current_ms > 0:
+            rel_angle = _math.radians(current_abs - heading)
+            current_effect_kts = float((current_ms / 0.51444) * _math.cos(rel_angle))
+        sog = max(0.0, stw + current_effect_kts)
+
+        # Speed loss from weather
+        speed_loss_pct = float((req.calm_speed_kts - stw) / req.calm_speed_kts * 100) if req.calm_speed_kts > 0 else 0.0
+
+        # Sanitise resistance_breakdown_kn (numpy → native float)
+        rb = r["resistance_breakdown_kn"]
+        rb_clean = {k: round(float(v), 4) for k, v in rb.items()}
+
+        result = {
+            "stw_kts": round(float(stw), 2),
+            "sog_kts": round(float(sog), 2),
+            "fuel_per_day_mt": round(float(r["fuel_mt"]), 3),
+            "fuel_per_nm_mt": round(float(r["fuel_mt"]) / (sog * 24), 4) if sog > 0 else 0.0,
+            "power_kw": round(float(min(r["required_power_kw"], model.specs.mcr_kw)), 0),
+            "required_power_kw": round(float(required_power_raw), 0),
+            "load_pct": round(actual_load_pct, 1),
+            "sfoc_gkwh": round(sfoc, 1),
+            "mcr_exceeded": mcr_exceeded,
+            "resistance_breakdown_kn": rb_clean,
+            "speed_loss_from_weather_pct": round(max(0.0, speed_loss_pct), 1),
+            "calm_water_speed_kts": req.calm_speed_kts,
+            "current_effect_kts": round(current_effect_kts, 2),
+            "service_speed_kts": float(model.specs.service_speed_laden if req.is_laden else model.specs.service_speed_ballast),
+            "mode": "calm_speed",
+            "inputs": {
+                "calm_speed_kts": req.calm_speed_kts,
+                "wind_relative_deg": req.wind_relative_deg,
+                "wave_relative_deg": req.wave_relative_deg,
+                "current_relative_deg": req.current_relative_deg,
+            },
+        }
+        return result
+
+    # Mode 1: engine_load_pct (default 85%)
+    load = req.engine_load_pct if req.engine_load_pct is not None else 85.0
 
     result = model.predict_performance(
         is_laden=req.is_laden,
         weather=weather,
-        engine_load_pct=req.engine_load_pct,
+        engine_load_pct=load,
         current_speed_ms=current_ms,
-        current_dir_deg=req.current_dir_deg,
-        heading_deg=req.heading_deg,
+        current_dir_deg=current_abs,
+        heading_deg=heading,
     )
+
+    result["mode"] = "engine_load"
+    result["inputs"] = {
+        "engine_load_pct": load,
+        "wind_relative_deg": req.wind_relative_deg,
+        "wave_relative_deg": req.wave_relative_deg,
+        "current_relative_deg": req.current_relative_deg,
+    }
 
     return result
 

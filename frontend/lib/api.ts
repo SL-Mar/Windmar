@@ -797,14 +797,14 @@ export interface FuelScenario {
 // Performance prediction types
 export interface PerformancePredictionRequest {
   is_laden: boolean;
-  engine_load_pct: number;
-  heading_deg: number;
+  engine_load_pct?: number;     // Mode 1: find speed at this power
+  calm_speed_kts?: number;      // Mode 2: find power for this calm-water speed
   wind_speed_kts: number;
-  wind_dir_deg: number;
+  wind_relative_deg: number;   // 0=ahead, 90=beam, 180=astern
   wave_height_m: number;
-  wave_dir_deg: number;
+  wave_relative_deg: number;   // 0=head seas, 90=beam, 180=following
   current_speed_kts: number;
-  current_dir_deg: number;
+  current_relative_deg: number; // 0=head current, 180=following
 }
 
 export interface PerformancePredictionResult {
@@ -825,6 +825,9 @@ export interface PerformancePredictionResult {
   calm_water_speed_kts: number;
   current_effect_kts: number;
   service_speed_kts: number;
+  mcr_exceeded?: boolean;
+  required_power_kw?: number;
+  mode?: string;
 }
 
 // Vessel model status types

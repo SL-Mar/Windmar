@@ -569,39 +569,54 @@ function FuelAnalysisSection() {
 
 function PerformancePredictor() {
   const [isLaden, setIsLaden] = useState(true);
+  const [mode, setMode] = useState<'engine_load' | 'calm_speed'>('engine_load');
   const [engineLoad, setEngineLoad] = useState(85);
-  const [heading, setHeading] = useState(0);
+  const [calmSpeed, setCalmSpeed] = useState(14.5);
   const [windSpeed, setWindSpeed] = useState(0);
-  const [windDir, setWindDir] = useState(0);
+  const [windRelDir, setWindRelDir] = useState(0);
   const [waveHeight, setWaveHeight] = useState(0);
-  const [waveDir, setWaveDir] = useState(0);
+  const [waveRelDir, setWaveRelDir] = useState(0);
   const [currentSpeed, setCurrentSpeed] = useState(0);
-  const [currentDir, setCurrentDir] = useState(0);
+  const [currentRelDir, setCurrentRelDir] = useState(0);
   const [result, setResult] = useState<PerformancePredictionResult | null>(null);
   const [loading, setLoading] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const relDirLabel = (deg: number) => {
+    if (deg === 0) return 'Head';
+    if (deg <= 30) return 'Bow quarter';
+    if (deg <= 60) return 'Fwd beam';
+    if (deg <= 90) return 'Beam';
+    if (deg <= 120) return 'Aft beam';
+    if (deg <= 150) return 'Quarter';
+    return 'Following';
+  };
+
   const predict = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await apiClient.predictPerformance({
+      const req: PerformancePredictionRequest = {
         is_laden: isLaden,
-        engine_load_pct: engineLoad,
-        heading_deg: heading,
         wind_speed_kts: windSpeed,
-        wind_dir_deg: windDir,
+        wind_relative_deg: windRelDir,
         wave_height_m: waveHeight,
-        wave_dir_deg: waveDir,
+        wave_relative_deg: waveRelDir,
         current_speed_kts: currentSpeed,
-        current_dir_deg: currentDir,
-      });
+        current_relative_deg: currentRelDir,
+      };
+      if (mode === 'engine_load') {
+        req.engine_load_pct = engineLoad;
+      } else {
+        req.calm_speed_kts = calmSpeed;
+      }
+      const r = await apiClient.predictPerformance(req);
       setResult(r);
     } catch (err) {
       console.error('Prediction failed:', err);
     } finally {
       setLoading(false);
     }
-  }, [isLaden, engineLoad, heading, windSpeed, windDir, waveHeight, waveDir, currentSpeed, currentDir]);
+  }, [isLaden, mode, engineLoad, calmSpeed, windSpeed, windRelDir, waveHeight, waveRelDir, currentSpeed, currentRelDir]);
 
   // Auto-predict on input change with debounce
   useEffect(() => {
@@ -628,16 +643,33 @@ function PerformancePredictor() {
             >Ballast</button>
           </div>
 
-          <SliderField label="Engine Load" value={engineLoad} onChange={setEngineLoad} min={15} max={100} step={5} unit="% MCR" />
-          <SliderField label="Heading" value={heading} onChange={setHeading} min={0} max={350} step={10} unit="deg" />
+          {/* Mode toggle: Engine Load vs Target Speed */}
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-gray-400">Mode:</span>
+            <button
+              onClick={() => setMode('engine_load')}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${mode === 'engine_load' ? 'bg-primary-500 text-white' : 'bg-maritime-dark text-gray-400 hover:text-white'}`}
+            >Engine Load</button>
+            <button
+              onClick={() => setMode('calm_speed')}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${mode === 'calm_speed' ? 'bg-primary-500 text-white' : 'bg-maritime-dark text-gray-400 hover:text-white'}`}
+            >Target Speed</button>
+          </div>
+
+          {mode === 'engine_load' ? (
+            <SliderField label="Engine Load" value={engineLoad} onChange={setEngineLoad} min={15} max={100} step={5} unit="% MCR" />
+          ) : (
+            <SliderField label="Calm Water Speed" value={calmSpeed} onChange={setCalmSpeed} min={5} max={20} step={0.5} unit="kts" />
+          )}
 
           <div className="border-t border-white/5 pt-3">
             <div className="text-xs text-gray-500 mb-2 flex items-center gap-1"><Wind className="w-3 h-3" /> Wind & Waves</div>
+            <p className="text-[10px] text-gray-600 mb-2">Directions relative to bow: 0°=ahead, 90°=beam, 180°=astern</p>
             <div className="space-y-3">
               <SliderField label="Wind Speed" value={windSpeed} onChange={setWindSpeed} min={0} max={60} step={5} unit="kts" />
-              <SliderField label="Wind Direction" value={windDir} onChange={setWindDir} min={0} max={350} step={10} unit="deg" />
+              <SliderField label="Wind Direction" value={windRelDir} onChange={setWindRelDir} min={0} max={180} step={15} unit={`° ${relDirLabel(windRelDir)}`} />
               <SliderField label="Wave Height" value={waveHeight} onChange={setWaveHeight} min={0} max={8} step={0.5} unit="m" />
-              <SliderField label="Wave Direction" value={waveDir} onChange={setWaveDir} min={0} max={350} step={10} unit="deg" />
+              <SliderField label="Wave Direction" value={waveRelDir} onChange={setWaveRelDir} min={0} max={180} step={15} unit={`° ${relDirLabel(waveRelDir)}`} />
             </div>
           </div>
 
@@ -645,7 +677,7 @@ function PerformancePredictor() {
             <div className="text-xs text-gray-500 mb-2">Current</div>
             <div className="space-y-3">
               <SliderField label="Current Speed" value={currentSpeed} onChange={setCurrentSpeed} min={0} max={5} step={0.5} unit="kts" />
-              <SliderField label="Current Direction" value={currentDir} onChange={setCurrentDir} min={0} max={350} step={10} unit="deg" />
+              <SliderField label="Current Direction" value={currentRelDir} onChange={setCurrentRelDir} min={0} max={180} step={15} unit={`° ${relDirLabel(currentRelDir)}`} />
             </div>
           </div>
         </div>
@@ -682,6 +714,22 @@ function PerformancePredictor() {
                   <span className="text-white font-medium">{result.sfoc_gkwh} g/kWh</span>
                 </div>
               </div>
+
+              {/* MCR exceeded warning (calm speed mode) */}
+              {result.mcr_exceeded && (
+                <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3 text-sm">
+                  <div className="flex items-center gap-2 text-red-400 mb-1">
+                    <AlertTriangle className="w-4 h-4" />
+                    <span className="font-medium">MCR Exceeded</span>
+                  </div>
+                  <div className="text-gray-300">
+                    Target speed requires <span className="text-red-400 font-medium">{result.required_power_kw?.toLocaleString()} kW</span>
+                    <span className="text-gray-500 ml-1">(MCR = {(result.power_kw).toLocaleString()} kW)</span>
+                    <br />
+                    <span className="text-gray-400">Speed capped to {result.stw_kts} kts at 100% MCR</span>
+                  </div>
+                </div>
+              )}
 
               {/* Weather impact */}
               {result.speed_loss_from_weather_pct > 0 && (
