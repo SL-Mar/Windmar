@@ -49,6 +49,37 @@ function deriveHoursFromFrames(frames: Record<string, unknown>): number[] {
   return hours.length > 0 ? hours : [];
 }
 
+/** Find the forecast hour closest to "now" given a run time and available frame keys.
+ *  Returns the nearest available hour that is <= now, or hour 0 as fallback. */
+function nearestHourToNow(runTimeStr: string, frames: Record<string, unknown>): number {
+  try {
+    const hours = deriveHoursFromFrames(frames);
+    if (hours.length === 0) return 0;
+    // Parse run time — formats: "20260217 00Z" or ISO "2026-02-17T00:00:00Z"
+    let runMs: number;
+    if (runTimeStr.includes('T') || runTimeStr.includes('-')) {
+      runMs = new Date(runTimeStr).getTime();
+    } else {
+      const parts = runTimeStr.split(' ');
+      const d = parts[0];
+      const h = parseInt(parts[1]?.replace('Z', '') || '0');
+      runMs = Date.UTC(parseInt(d.slice(0, 4)), parseInt(d.slice(4, 6)) - 1, parseInt(d.slice(6, 8)), h);
+    }
+    if (isNaN(runMs)) { debugLog('info', 'TIMELINE', `nearestHourToNow: invalid runMs for "${runTimeStr}"`); return 0; }
+    const elapsedHours = (Date.now() - runMs) / 3_600_000;
+    // Find largest available hour <= elapsedHours (i.e., most recent past frame)
+    let best = hours[0];
+    for (const h of hours) {
+      if (h <= elapsedHours) best = h;
+      else break;
+    }
+    debugLog('info', 'TIMELINE', `nearestHourToNow: run="${runTimeStr}" elapsed=${elapsedHours.toFixed(1)}h → T+${best}h`);
+    return best;
+  } catch {
+    return 0;
+  }
+}
+
 export default function ForecastTimeline({
   visible,
   onClose,
@@ -89,6 +120,30 @@ export default function ForecastTimeline({
   // Reset available hours when layer changes so stale data from a previous layer doesn't persist
   useEffect(() => { setAvailableHours([]); setCurrentHour(0); }, [layerType]);
 
+  // Invalidate all cached frames when data timestamp changes (e.g., after resync)
+  const prevTimestampRef = useRef(dataTimestamp);
+  useEffect(() => {
+    if (dataTimestamp && dataTimestamp !== prevTimestampRef.current) {
+      debugLog('info', 'TIMELINE', `Data timestamp changed — clearing frame caches for re-fetch`);
+      setWindFrames({});
+      windFramesRef.current = {};
+      setWaveFrameData(null);
+      waveFrameDataRef.current = null;
+      setCurrentFrameData(null);
+      currentFrameDataRef.current = null;
+      setIceFrameData(null);
+      iceFrameDataRef.current = null;
+      setSstFrameData(null);
+      sstFrameDataRef.current = null;
+      setVisFrameData(null);
+      visFrameDataRef.current = null;
+      setPrefetchComplete(false);
+      setAvailableHours([]);
+      setCurrentHour(0);
+    }
+    prevTimestampRef.current = dataTimestamp;
+  }, [dataTimestamp]);
+
   // Effective hours: use DB-derived if available, else defaults
   const defaultHours = isIceMode ? DEFAULT_ICE_FORECAST_HOURS : DEFAULT_FORECAST_HOURS;
   const activeHours = availableHours.length > 0 ? availableHours : defaultHours;
@@ -124,7 +179,8 @@ export default function ForecastTimeline({
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const sliderRafRef = useRef<number | null>(null);
 
-  // Snapshot viewport bounds into a ref — never let it revert to null once set
+  // Track viewport bounds — updates freely on pan/zoom but does NOT trigger re-fetch
+  // (boundsKey cache-clearing effect removed). Only dataTimestamp (resync) triggers re-fetch.
   const boundsRef = useRef<ViewportBounds | null>(viewportBounds ?? null);
   const hasBounds = boundsRef.current !== null;
   useEffect(() => {
@@ -135,48 +191,33 @@ export default function ForecastTimeline({
   // Only triggers re-fetch when the user pans to a truly different ocean region,
   // NOT on every small pan (which would miss the backend's per-bounds frame cache).
   const BOUNDS_GRID = 10; // degrees
-  const roundBounds = (v: number) => Math.floor(v / BOUNDS_GRID) * BOUNDS_GRID;
 
   // Pad viewport bounds OUT to grid cell edges so fetched data always covers the
   // full grid cell.  This prevents truncated overlays when panning within a cell.
+  // Cap to MAX_SPAN degrees per axis to avoid multi-GB responses when zoomed out.
+  const MAX_SPAN = 120; // degrees — keeps response ~290 MB at 0.25° grid
   const paddedBounds = () => {
     const b = boundsRef.current;
     if (!b) return {};
-    return {
-      lat_min: Math.floor(b.lat_min / BOUNDS_GRID) * BOUNDS_GRID,
-      lat_max: Math.ceil(b.lat_max / BOUNDS_GRID) * BOUNDS_GRID,
-      lon_min: Math.floor(b.lon_min / BOUNDS_GRID) * BOUNDS_GRID,
-      lon_max: Math.ceil(b.lon_max / BOUNDS_GRID) * BOUNDS_GRID,
-    };
-  };
-  const [boundsKey, setBoundsKey] = useState('');
-  const activeBoundsKeyRef = useRef<string>('');
-  useEffect(() => {
-    if (!viewportBounds) return;
-    const key = `${roundBounds(viewportBounds.lat_min)}_${roundBounds(viewportBounds.lat_max)}_${roundBounds(viewportBounds.lon_min)}_${roundBounds(viewportBounds.lon_max)}`;
-    if (activeBoundsKeyRef.current && key !== activeBoundsKeyRef.current) {
-      debugLog('info', 'TIMELINE', `Region changed: ${activeBoundsKeyRef.current} → ${key} — clearing frame caches`);
-      // Clear all client-side frame caches
-      setWindFrames({});
-      windFramesRef.current = {};
-      setWaveFrameData(null);
-      waveFrameDataRef.current = null;
-      setCurrentFrameData(null);
-      currentFrameDataRef.current = null;
-      setIceFrameData(null);
-      iceFrameDataRef.current = null;
-      setSstFrameData(null);
-      sstFrameDataRef.current = null;
-      setVisFrameData(null);
-      visFrameDataRef.current = null;
-      // Reset prefetch state so effects re-trigger
-      setPrefetchComplete(false);
-      setAvailableHours([]);
-      setCurrentHour(0);
+    let lat_min = Math.floor(b.lat_min / BOUNDS_GRID) * BOUNDS_GRID;
+    let lat_max = Math.ceil(b.lat_max / BOUNDS_GRID) * BOUNDS_GRID;
+    let lon_min = Math.floor(b.lon_min / BOUNDS_GRID) * BOUNDS_GRID;
+    let lon_max = Math.ceil(b.lon_max / BOUNDS_GRID) * BOUNDS_GRID;
+    // Clamp oversized spans around viewport center
+    if (lat_max - lat_min > MAX_SPAN) {
+      const mid = (b.lat_min + b.lat_max) / 2;
+      lat_min = Math.floor((mid - MAX_SPAN / 2) / BOUNDS_GRID) * BOUNDS_GRID;
+      lat_max = lat_min + MAX_SPAN;
     }
-    activeBoundsKeyRef.current = key;
-    setBoundsKey(key);
-  }, [viewportBounds]);
+    if (lon_max - lon_min > MAX_SPAN) {
+      const mid = (b.lon_min + b.lon_max) / 2;
+      lon_min = Math.floor((mid - MAX_SPAN / 2) / BOUNDS_GRID) * BOUNDS_GRID;
+      lon_max = lon_min + MAX_SPAN;
+    }
+    return { lat_min, lat_max, lon_min, lon_max };
+  };
+  // NOTE: No auto-refetch on pan/zoom. Data loads once when timeline opens.
+  // Manual resync (dataTimestamp change) handles region changes.
 
   // Keep refs in sync
   useEffect(() => { windFramesRef.current = windFrames; }, [windFrames]);
@@ -196,10 +237,18 @@ export default function ForecastTimeline({
       const data: ForecastFrames = await apiClient.getForecastFrames(bp);
       setWindFrames(data.frames);
       setAvailableHours(deriveHoursFromFrames(data.frames));
-      setRunTime(`${data.run_date} ${data.run_hour}Z`);
+      const rt = `${data.run_date} ${data.run_hour}Z`;
+      setRunTime(rt);
       setPrefetchComplete(true);
       setIsLoading(false);
-      if (data.frames['0']) onForecastHourChange(0, data.frames['0']);
+      const initHour = nearestHourToNow(rt, data.frames);
+      const initKey = String(initHour);
+      if (data.frames[initKey]) {
+        setCurrentHour(initHour);
+        onForecastHourChange(initHour, data.frames[initKey]);
+      } else if (data.frames['0']) {
+        onForecastHourChange(0, data.frames['0']);
+      }
     } catch (e) {
       console.error('Failed to load wind forecast frames:', e);
       setIsLoading(false);
@@ -231,21 +280,23 @@ export default function ForecastTimeline({
       setWaveFrameData(data);
       setAvailableHours(deriveHoursFromFrames(data.frames));
       const rt = data.run_time;
+      let rtFormatted = rt || '';
       if (rt) {
         try {
           const d = new Date(rt);
-          setRunTime(
-            `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')} ${String(d.getUTCHours()).padStart(2, '0')}Z`
-          );
+          rtFormatted = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')} ${String(d.getUTCHours()).padStart(2, '0')}Z`;
+          setRunTime(rtFormatted);
         } catch {
           setRunTime(rt);
         }
       }
       setPrefetchComplete(true);
       setIsLoading(false);
-      if (data.frames['0'] && onWaveForecastHourChange) {
-        debugLog('info', 'WAVE', 'Setting initial frame T+0h');
-        onWaveForecastHourChange(0, data);
+      if (onWaveForecastHourChange) {
+        const initHour = nearestHourToNow(rtFormatted || rt || '', data.frames);
+        debugLog('info', 'WAVE', `Setting initial frame T+${initHour}h`);
+        setCurrentHour(initHour);
+        onWaveForecastHourChange(initHour, data);
       }
     } catch (e) {
       debugLog('error', 'WAVE', `Failed to load wave forecast frames: ${e}`);
@@ -254,7 +305,7 @@ export default function ForecastTimeline({
   }, [onWaveForecastHourChange]);
 
   // ------------------------------------------------------------------
-  // Wind prefetch effect
+  // Wind prefetch effect — direct frame load (matches wave/current/ice pattern)
   // ------------------------------------------------------------------
   useEffect(() => {
     if (!visible || !isWindMode || !boundsRef.current) return;
@@ -264,47 +315,25 @@ export default function ForecastTimeline({
       setAvailableHours(deriveHoursFromFrames(windFramesRef.current));
       setPrefetchComplete(true);
       setIsLoading(false);
-      if (windFramesRef.current['0']) onForecastHourChange(0, windFramesRef.current['0']);
+      const initHour = nearestHourToNow(runTime ?? '', windFramesRef.current);
+      const initKey = String(initHour);
+      if (windFramesRef.current[initKey]) {
+        setCurrentHour(initHour);
+        onForecastHourChange(initHour, windFramesRef.current[initKey]);
+      } else if (windFramesRef.current['0']) {
+        onForecastHourChange(0, windFramesRef.current['0']);
+      }
       return;
     }
 
-    let cancelled = false;
     const bp = paddedBounds();
+    setIsLoading(true);
+    setPrefetchComplete(false);
+    loadWindFrames(bp);
 
-    const start = async () => {
-      setIsLoading(true);
-      setPrefetchComplete(false);
-      try {
-        await apiClient.triggerForecastPrefetch(bp);
-        const poll = async () => {
-          if (cancelled) return;
-          try {
-            const st = await apiClient.getForecastStatus(bp);
-            setLoadProgress({ cached: st.cached_hours, total: st.total_hours });
-            setRunTime(`${st.run_date} ${st.run_hour}Z`);
-            if (st.complete || st.cached_hours === st.total_hours) {
-              if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
-              await loadWindFrames(bp);
-            } else if (!st.prefetch_running && st.cached_hours === 0) {
-              if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; }
-              debugLog('info', 'WIND', 'Status shows 0 cached, prefetch idle — loading frames directly');
-              await loadWindFrames(bp);
-            }
-          } catch (e) { console.error('Wind forecast poll failed:', e); }
-        };
-        await poll();
-        if (!cancelled && pollIntervalRef.current === null && !prefetchComplete) {
-          pollIntervalRef.current = setInterval(poll, 3000);
-        }
-      } catch (e) {
-        console.error('Wind forecast prefetch trigger failed:', e);
-        setIsLoading(false);
-      }
-    };
-
-    start();
-    return () => { cancelled = true; if (pollIntervalRef.current) { clearInterval(pollIntervalRef.current); pollIntervalRef.current = null; } };
-  }, [visible, isWindMode, hasBounds, boundsKey, loadWindFrames]);
+    // Fire-and-forget: warm the GRIB file cache for future requests
+    apiClient.triggerForecastPrefetch(bp).catch(() => {});
+  }, [visible, isWindMode, hasBounds, dataTimestamp, loadWindFrames]);
 
   // ------------------------------------------------------------------
   // Wave prefetch effect — loads frames directly (backend extracts on-the-fly)
@@ -316,13 +345,17 @@ export default function ForecastTimeline({
       setAvailableHours(deriveHoursFromFrames(data.frames));
       setPrefetchComplete(true);
       setIsLoading(false);
-      if (data.frames['0'] && onWaveForecastHourChange) onWaveForecastHourChange(0, data);
+      if (onWaveForecastHourChange) {
+        const initHour = nearestHourToNow(runTime ?? data.run_time ?? '', data.frames);
+        setCurrentHour(initHour);
+        onWaveForecastHourChange(initHour, data);
+      }
       return;
     }
     setIsLoading(true);
     setPrefetchComplete(false);
     loadWaveFrames();
-  }, [visible, isWaveMode, hasBounds, boundsKey, loadWaveFrames]);
+  }, [visible, isWaveMode, hasBounds, dataTimestamp, loadWaveFrames]);
 
   // ------------------------------------------------------------------
   // Current forecast: load all frames
@@ -338,21 +371,23 @@ export default function ForecastTimeline({
       debugLog('info', 'CURRENT', `Loaded ${frameKeys.length} frames in ${dt}s, grid=${data.ny}x${data.nx}`);
       setCurrentFrameData(data);
       setAvailableHours(deriveHoursFromFrames(data.frames));
+      let rtFormatted = data.run_time || '';
       if (data.run_time) {
         try {
           const d = new Date(data.run_time);
-          setRunTime(
-            `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')} ${String(d.getUTCHours()).padStart(2, '0')}Z`
-          );
+          rtFormatted = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')} ${String(d.getUTCHours()).padStart(2, '0')}Z`;
+          setRunTime(rtFormatted);
         } catch {
           setRunTime(data.run_time);
         }
       }
       setPrefetchComplete(true);
       setIsLoading(false);
-      if (data.frames['0'] && onCurrentForecastHourChange) {
-        debugLog('info', 'CURRENT', 'Setting initial current frame T+0h');
-        onCurrentForecastHourChange(0, data);
+      if (onCurrentForecastHourChange) {
+        const initHour = nearestHourToNow(rtFormatted, data.frames);
+        debugLog('info', 'CURRENT', `Setting initial current frame T+${initHour}h`);
+        setCurrentHour(initHour);
+        onCurrentForecastHourChange(initHour, data);
       }
     } catch (e) {
       debugLog('error', 'CURRENT', `Failed to load current forecast frames: ${e}`);
@@ -371,13 +406,17 @@ export default function ForecastTimeline({
       setAvailableHours(deriveHoursFromFrames(data.frames));
       setPrefetchComplete(true);
       setIsLoading(false);
-      if (data.frames['0'] && onCurrentForecastHourChange) onCurrentForecastHourChange(0, data);
+      if (onCurrentForecastHourChange) {
+        const initHour = nearestHourToNow(runTime ?? data.run_time ?? '', data.frames);
+        setCurrentHour(initHour);
+        onCurrentForecastHourChange(initHour, data);
+      }
       return;
     }
     setIsLoading(true);
     setPrefetchComplete(false);
     loadCurrentFrames();
-  }, [visible, isCurrentMode, hasBounds, boundsKey, loadCurrentFrames]);
+  }, [visible, isCurrentMode, hasBounds, dataTimestamp, loadCurrentFrames]);
 
   // ------------------------------------------------------------------
   // Ice forecast: load all frames
@@ -393,21 +432,23 @@ export default function ForecastTimeline({
       debugLog('info', 'ICE', `Loaded ${frameKeys.length} frames in ${dt}s, grid=${data.ny}x${data.nx}`);
       setIceFrameData(data);
       setAvailableHours(deriveHoursFromFrames(data.frames));
+      let rtFormatted = data.run_time || '';
       if (data.run_time) {
         try {
           const d = new Date(data.run_time);
-          setRunTime(
-            `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')} ${String(d.getUTCHours()).padStart(2, '0')}Z`
-          );
+          rtFormatted = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')} ${String(d.getUTCHours()).padStart(2, '0')}Z`;
+          setRunTime(rtFormatted);
         } catch {
           setRunTime(data.run_time);
         }
       }
       setPrefetchComplete(true);
       setIsLoading(false);
-      if (data.frames['0'] && onIceForecastHourChange) {
-        debugLog('info', 'ICE', 'Setting initial ice frame T+0h');
-        onIceForecastHourChange(0, data);
+      if (onIceForecastHourChange) {
+        const initHour = nearestHourToNow(rtFormatted, data.frames);
+        debugLog('info', 'ICE', `Setting initial ice frame T+${initHour}h`);
+        setCurrentHour(initHour);
+        onIceForecastHourChange(initHour, data);
       }
     } catch (e) {
       debugLog('error', 'ICE', `Failed to load ice forecast frames: ${e}`);
@@ -426,13 +467,17 @@ export default function ForecastTimeline({
       setAvailableHours(deriveHoursFromFrames(data.frames));
       setPrefetchComplete(true);
       setIsLoading(false);
-      if (data.frames['0'] && onIceForecastHourChange) onIceForecastHourChange(0, data);
+      if (onIceForecastHourChange) {
+        const initHour = nearestHourToNow(runTime ?? data.run_time ?? '', data.frames);
+        setCurrentHour(initHour);
+        onIceForecastHourChange(initHour, data);
+      }
       return;
     }
     setIsLoading(true);
     setPrefetchComplete(false);
     loadIceFrames();
-  }, [visible, isIceMode, hasBounds, boundsKey, loadIceFrames]);
+  }, [visible, isIceMode, hasBounds, dataTimestamp, loadIceFrames]);
 
   // ------------------------------------------------------------------
   // Swell prefetch effect (reuses wave data — swell is embedded in wave frames)
@@ -451,9 +496,12 @@ export default function ForecastTimeline({
       setAvailableHours(deriveHoursFromFrames(data.frames));
       setPrefetchComplete(true);
       setIsLoading(false);
-      if (data.frames['0'] && onSwellForecastHourChange) {
-        debugLog('info', 'SWELL', 'Setting initial swell frame T+0h');
-        onSwellForecastHourChange(0, data);
+      if (onSwellForecastHourChange) {
+        const rtStr = data.run_time ?? '';
+        const initHour = nearestHourToNow(rtStr, data.frames);
+        debugLog('info', 'SWELL', `Setting initial swell frame T+${initHour}h`);
+        setCurrentHour(initHour);
+        onSwellForecastHourChange(initHour, data);
       }
     } catch (e) {
       debugLog('error', 'SWELL', `Failed to load swell forecast frames: ${e}`);
@@ -469,13 +517,17 @@ export default function ForecastTimeline({
       setAvailableHours(deriveHoursFromFrames(data.frames));
       setPrefetchComplete(true);
       setIsLoading(false);
-      if (data.frames['0'] && onSwellForecastHourChange) onSwellForecastHourChange(0, data);
+      if (onSwellForecastHourChange) {
+        const initHour = nearestHourToNow(runTime ?? data.run_time ?? '', data.frames);
+        setCurrentHour(initHour);
+        onSwellForecastHourChange(initHour, data);
+      }
       return;
     }
     setIsLoading(true);
     setPrefetchComplete(false);
     loadSwellFrames();
-  }, [visible, isSwellMode, hasBounds, boundsKey, loadSwellFrames]);
+  }, [visible, isSwellMode, hasBounds, dataTimestamp, loadSwellFrames]);
 
   // ------------------------------------------------------------------
   // SST forecast: load all frames
@@ -491,21 +543,23 @@ export default function ForecastTimeline({
       debugLog('info', 'SST', `Loaded ${frameKeys.length} frames in ${dt}s, grid=${data.ny}x${data.nx}`);
       setSstFrameData(data);
       setAvailableHours(deriveHoursFromFrames(data.frames));
+      let rtFormatted = data.run_time || '';
       if (data.run_time) {
         try {
           const d = new Date(data.run_time);
-          setRunTime(
-            `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')} ${String(d.getUTCHours()).padStart(2, '0')}Z`
-          );
+          rtFormatted = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')} ${String(d.getUTCHours()).padStart(2, '0')}Z`;
+          setRunTime(rtFormatted);
         } catch {
           setRunTime(data.run_time);
         }
       }
       setPrefetchComplete(true);
       setIsLoading(false);
-      if (data.frames['0'] && onSstForecastHourChange) {
-        debugLog('info', 'SST', 'Setting initial SST frame T+0h');
-        onSstForecastHourChange(0, data);
+      if (onSstForecastHourChange) {
+        const initHour = nearestHourToNow(rtFormatted, data.frames);
+        debugLog('info', 'SST', `Setting initial SST frame T+${initHour}h`);
+        setCurrentHour(initHour);
+        onSstForecastHourChange(initHour, data);
       }
     } catch (e) {
       debugLog('error', 'SST', `Failed to load SST forecast frames: ${e}`);
@@ -524,13 +578,17 @@ export default function ForecastTimeline({
       setAvailableHours(deriveHoursFromFrames(data.frames));
       setPrefetchComplete(true);
       setIsLoading(false);
-      if (data.frames['0'] && onSstForecastHourChange) onSstForecastHourChange(0, data);
+      if (onSstForecastHourChange) {
+        const initHour = nearestHourToNow(runTime ?? data.run_time ?? '', data.frames);
+        setCurrentHour(initHour);
+        onSstForecastHourChange(initHour, data);
+      }
       return;
     }
     setIsLoading(true);
     setPrefetchComplete(false);
     loadSstFrames();
-  }, [visible, isSstMode, hasBounds, boundsKey, loadSstFrames]);
+  }, [visible, isSstMode, hasBounds, dataTimestamp, loadSstFrames]);
 
   // ------------------------------------------------------------------
   // Visibility forecast: load all frames
@@ -546,21 +604,23 @@ export default function ForecastTimeline({
       debugLog('info', 'VIS', `Loaded ${frameKeys.length} frames in ${dt}s, grid=${data.ny}x${data.nx}`);
       setVisFrameData(data);
       setAvailableHours(deriveHoursFromFrames(data.frames));
+      let rtFormatted = data.run_time || '';
       if (data.run_time) {
         try {
           const d = new Date(data.run_time);
-          setRunTime(
-            `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')} ${String(d.getUTCHours()).padStart(2, '0')}Z`
-          );
+          rtFormatted = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')} ${String(d.getUTCHours()).padStart(2, '0')}Z`;
+          setRunTime(rtFormatted);
         } catch {
           setRunTime(data.run_time);
         }
       }
       setPrefetchComplete(true);
       setIsLoading(false);
-      if (data.frames['0'] && onVisForecastHourChange) {
-        debugLog('info', 'VIS', 'Setting initial visibility frame T+0h');
-        onVisForecastHourChange(0, data);
+      if (onVisForecastHourChange) {
+        const initHour = nearestHourToNow(rtFormatted, data.frames);
+        debugLog('info', 'VIS', `Setting initial visibility frame T+${initHour}h`);
+        setCurrentHour(initHour);
+        onVisForecastHourChange(initHour, data);
       }
     } catch (e) {
       debugLog('error', 'VIS', `Failed to load visibility forecast frames: ${e}`);
@@ -579,13 +639,17 @@ export default function ForecastTimeline({
       setAvailableHours(deriveHoursFromFrames(data.frames));
       setPrefetchComplete(true);
       setIsLoading(false);
-      if (data.frames['0'] && onVisForecastHourChange) onVisForecastHourChange(0, data);
+      if (onVisForecastHourChange) {
+        const initHour = nearestHourToNow(runTime ?? data.run_time ?? '', data.frames);
+        setCurrentHour(initHour);
+        onVisForecastHourChange(initHour, data);
+      }
       return;
     }
     setIsLoading(true);
     setPrefetchComplete(false);
     loadVisFrames();
-  }, [visible, isVisMode, hasBounds, boundsKey, loadVisFrames]);
+  }, [visible, isVisMode, hasBounds, dataTimestamp, loadVisFrames]);
 
   // ------------------------------------------------------------------
   // Play/pause

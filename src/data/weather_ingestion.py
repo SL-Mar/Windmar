@@ -94,6 +94,10 @@ class WeatherIngestionService:
         Downloads 41 GRIB files from NOAA NOMADS with 2s rate limiting
         between requests. Cached GRIBs are reused (no download needed).
         Skips if a recent multi-timestep run already exists in the DB.
+
+        Old runs are only superseded AFTER the new run proves it has at
+        least as many hours — prevents data loss when NOMADS is still
+        publishing a new GFS cycle.
         """
         import time as _time
 
@@ -103,19 +107,15 @@ class WeatherIngestionService:
             logger.debug("Skipping wind ingestion — multi-timestep GFS run exists in DB")
             return
 
+        # Count hours in existing best run (for deferred supersede)
+        old_hour_count = self._count_best_run_hours(source)
+
         run_time = datetime.now(timezone.utc)
         conn = self._get_conn()
         try:
             cur = conn.cursor()
 
-            # Supersede any existing complete GFS runs
-            cur.execute(
-                """UPDATE weather_forecast_runs SET status = 'superseded'
-                   WHERE source = %s AND status = 'complete'""",
-                (source,),
-            )
-
-            # Create forecast run record
+            # Create new forecast run (do NOT supersede old runs yet)
             cur.execute(
                 """INSERT INTO weather_forecast_runs
                    (source, run_time, status, grid_resolution,
@@ -179,8 +179,23 @@ class WeatherIngestionService:
                     logger.error(f"Failed to ingest GFS wind f{fh:03d}: {e}")
                     conn.rollback()
 
-            # Mark run complete
-            status = "complete" if ingested_hours else "failed"
+            # Only supersede old runs if new run has at least as many hours
+            if len(ingested_hours) >= old_hour_count:
+                cur.execute(
+                    """UPDATE weather_forecast_runs SET status = 'superseded'
+                       WHERE source = %s AND status = 'complete' AND id != %s""",
+                    (source, run_id),
+                )
+                status = "complete" if ingested_hours else "failed"
+                logger.info(f"GFS wind: new run ({len(ingested_hours)}h) >= old ({old_hour_count}h) — superseded old runs")
+            else:
+                # New run has fewer hours — mark it failed, keep old run
+                status = "failed"
+                logger.warning(
+                    f"GFS wind: new run ({len(ingested_hours)}h) < old ({old_hour_count}h) "
+                    f"— keeping old run, marking new as failed"
+                )
+
             cur.execute(
                 "UPDATE weather_forecast_runs SET status = %s, forecast_hours = %s WHERE id = %s",
                 (status, ingested_hours, run_id),
@@ -210,6 +225,31 @@ class WeatherIngestionService:
             return cur.fetchone() is not None
         except Exception:
             return False
+        finally:
+            conn.close()
+
+    def _count_best_run_hours(self, source: str) -> int:
+        """Return the hour count of the best existing complete run for a source.
+
+        Used by deferred-supersede logic: new runs only replace old ones
+        if they have at least as many forecast hours.
+        """
+        conn = self._get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT COALESCE(array_length(forecast_hours, 1), 0)
+                   FROM weather_forecast_runs
+                   WHERE source = %s AND status = 'complete'
+                   ORDER BY array_length(forecast_hours, 1) DESC NULLS LAST,
+                            run_time DESC
+                   LIMIT 1""",
+                (source,),
+            )
+            row = cur.fetchone()
+            return row[0] if row else 0
+        except Exception:
+            return 0
         finally:
             conn.close()
 
@@ -329,18 +369,12 @@ class WeatherIngestionService:
         source = "cmems_wave"
         run_time = datetime.now(timezone.utc)
         forecast_hours = sorted(frames.keys())
+        old_hour_count = self._count_best_run_hours(source)
         conn = self._get_conn()
         try:
             cur = conn.cursor()
 
-            # Supersede any existing complete wave runs before creating new one
-            cur.execute(
-                """UPDATE weather_forecast_runs SET status = 'superseded'
-                   WHERE source = %s AND status = 'complete'""",
-                (source,),
-            )
-
-            # Create forecast run record with ALL forecast hours
+            # Create forecast run record (defer supersede until we know new run is better)
             cur.execute(
                 """INSERT INTO weather_forecast_runs
                    (source, run_time, status, grid_resolution,
@@ -396,7 +430,20 @@ class WeatherIngestionService:
                     logger.error(f"Failed to ingest wave forecast f{fh:03d}: {e}")
                     conn.rollback()
 
-            status = "complete" if ingested_count > 0 else "failed"
+            # Only supersede old runs if new run has at least as many hours
+            if ingested_count >= old_hour_count:
+                cur.execute(
+                    """UPDATE weather_forecast_runs SET status = 'superseded'
+                       WHERE source = %s AND status = 'complete' AND id != %s""",
+                    (source, run_id),
+                )
+                status = "complete" if ingested_count > 0 else "failed"
+            else:
+                status = "failed"
+                logger.warning(
+                    f"Wave: new run ({ingested_count}h) < old ({old_hour_count}h) — keeping old"
+                )
+
             cur.execute(
                 "UPDATE weather_forecast_runs SET status = %s WHERE id = %s",
                 (status, run_id),
@@ -426,16 +473,10 @@ class WeatherIngestionService:
         source = "cmems_current"
         run_time = datetime.now(timezone.utc)
         forecast_hours = sorted(frames.keys())
+        old_hour_count = self._count_best_run_hours(source)
         conn = self._get_conn()
         try:
             cur = conn.cursor()
-
-            # Supersede any existing complete current runs
-            cur.execute(
-                """UPDATE weather_forecast_runs SET status = 'superseded'
-                   WHERE source = %s AND status = 'complete'""",
-                (source,),
-            )
 
             cur.execute(
                 """INSERT INTO weather_forecast_runs
@@ -485,7 +526,19 @@ class WeatherIngestionService:
                     logger.error(f"Failed to ingest current forecast f{fh:03d}: {e}")
                     conn.rollback()
 
-            status = "complete" if ingested_count > 0 else "failed"
+            if ingested_count >= old_hour_count:
+                cur.execute(
+                    """UPDATE weather_forecast_runs SET status = 'superseded'
+                       WHERE source = %s AND status = 'complete' AND id != %s""",
+                    (source, run_id),
+                )
+                status = "complete" if ingested_count > 0 else "failed"
+            else:
+                status = "failed"
+                logger.warning(
+                    f"Current: new run ({ingested_count}h) < old ({old_hour_count}h) — keeping old"
+                )
+
             cur.execute(
                 "UPDATE weather_forecast_runs SET status = %s WHERE id = %s",
                 (status, run_id),
@@ -516,16 +569,10 @@ class WeatherIngestionService:
         source = "cmems_ice"
         run_time = datetime.now(timezone.utc)
         forecast_hours = sorted(frames.keys())
+        old_hour_count = self._count_best_run_hours(source)
         conn = self._get_conn()
         try:
             cur = conn.cursor()
-
-            # Supersede any existing complete ice runs
-            cur.execute(
-                """UPDATE weather_forecast_runs SET status = 'superseded'
-                   WHERE source = %s AND status = 'complete'""",
-                (source,),
-            )
 
             cur.execute(
                 """INSERT INTO weather_forecast_runs
@@ -572,7 +619,19 @@ class WeatherIngestionService:
                     logger.error(f"Failed to ingest ice forecast f{fh:03d}: {e}")
                     conn.rollback()
 
-            status = "complete" if ingested_count > 0 else "failed"
+            if ingested_count >= old_hour_count:
+                cur.execute(
+                    """UPDATE weather_forecast_runs SET status = 'superseded'
+                       WHERE source = %s AND status = 'complete' AND id != %s""",
+                    (source, run_id),
+                )
+                status = "complete" if ingested_count > 0 else "failed"
+            else:
+                status = "failed"
+                logger.warning(
+                    f"Ice: new run ({ingested_count}h) < old ({old_hour_count}h) — keeping old"
+                )
+
             cur.execute(
                 "UPDATE weather_forecast_runs SET status = %s WHERE id = %s",
                 (status, run_id),
@@ -646,16 +705,10 @@ class WeatherIngestionService:
         source = "cmems_sst"
         run_time = datetime.now(timezone.utc)
         forecast_hours = sorted(frames.keys())
+        old_hour_count = self._count_best_run_hours(source)
         conn = self._get_conn()
         try:
             cur = conn.cursor()
-
-            # Supersede any existing complete SST runs
-            cur.execute(
-                """UPDATE weather_forecast_runs SET status = 'superseded'
-                   WHERE source = %s AND status = 'complete'""",
-                (source,),
-            )
 
             cur.execute(
                 """INSERT INTO weather_forecast_runs
@@ -702,7 +755,19 @@ class WeatherIngestionService:
                     logger.error(f"Failed to ingest SST forecast f{fh:03d}: {e}")
                     conn.rollback()
 
-            status = "complete" if ingested_count > 0 else "failed"
+            if ingested_count >= old_hour_count:
+                cur.execute(
+                    """UPDATE weather_forecast_runs SET status = 'superseded'
+                       WHERE source = %s AND status = 'complete' AND id != %s""",
+                    (source, run_id),
+                )
+                status = "complete" if ingested_count > 0 else "failed"
+            else:
+                status = "failed"
+                logger.warning(
+                    f"SST: new run ({ingested_count}h) < old ({old_hour_count}h) — keeping old"
+                )
+
             cur.execute(
                 "UPDATE weather_forecast_runs SET status = %s WHERE id = %s",
                 (status, run_id),
@@ -732,16 +797,10 @@ class WeatherIngestionService:
         source = "gfs_visibility"
         run_time = datetime.now(timezone.utc)
         forecast_hours = sorted(frames.keys())
+        old_hour_count = self._count_best_run_hours(source)
         conn = self._get_conn()
         try:
             cur = conn.cursor()
-
-            # Supersede any existing complete visibility runs
-            cur.execute(
-                """UPDATE weather_forecast_runs SET status = 'superseded'
-                   WHERE source = %s AND status = 'complete'""",
-                (source,),
-            )
 
             cur.execute(
                 """INSERT INTO weather_forecast_runs
@@ -788,7 +847,19 @@ class WeatherIngestionService:
                     logger.error(f"Failed to ingest visibility forecast f{fh:03d}: {e}")
                     conn.rollback()
 
-            status = "complete" if ingested_count > 0 else "failed"
+            if ingested_count >= old_hour_count:
+                cur.execute(
+                    """UPDATE weather_forecast_runs SET status = 'superseded'
+                       WHERE source = %s AND status = 'complete' AND id != %s""",
+                    (source, run_id),
+                )
+                status = "complete" if ingested_count > 0 else "failed"
+            else:
+                status = "failed"
+                logger.warning(
+                    f"Visibility: new run ({ingested_count}h) < old ({old_hour_count}h) — keeping old"
+                )
+
             cur.execute(
                 "UPDATE weather_forecast_runs SET status = %s WHERE id = %s",
                 (status, run_id),

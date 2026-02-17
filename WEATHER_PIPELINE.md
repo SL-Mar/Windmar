@@ -182,9 +182,46 @@ Only available when a layer is active (button hidden when `weatherLayer === 'non
 ### Timeline Activation (user clicks Timeline button)
 
 1. Frontend calls the layer's `/frames` endpoint (e.g., `GET /api/weather/forecast/frames?lat_min=...`)
-2. Backend reads ALL forecast frames from file cache (Tier 2) or assembles from DB
+2. Backend reads ALL forecast frames from file cache (Tier 2) or rebuilds from DB (Tier 1)
 3. Entire multi-frame response loaded into browser memory
 4. User scrubs the timeline slider — frame switching is instant (client-side)
+5. Slider auto-positions to the forecast hour nearest to "now" based on the model run time
+
+**All 7 layers use the same direct-load pattern:**
+- Check client-side cache (React ref) first — if frames exist, restore UI instantly with no network call
+- If cache miss, call `loadXxxFrames()` which hits the `/frames` endpoint
+- Backend serves from file cache if available, otherwise rebuilds from PostgreSQL (~3s for wind, up to ~50s for large viewports)
+- No prefetch/polling — a single request-response cycle
+
+**Viewport bounds and the MAX_SPAN cap:**
+- When the timeline opens, the current viewport bounds are padded to 10-degree grid cell edges
+- A MAX_SPAN cap (120 degrees per axis) prevents requests for near-global grids that would produce multi-hundred-MB responses
+- Pan/zoom after timeline open does NOT trigger re-fetch — data stays fixed to the bounds captured at load time
+- To get data for a different region: click Resync with the desired region visible, then re-open the timeline
+
+**refTime consistency:**
+- All frames in a single response share the same `refTime` (the GFS/CMEMS model run time), not the per-frame valid time
+- This prevents the frontend's wind field cache from thrashing (rebuilding 180K-point 2D arrays on every frame change)
+
+### This is NOT Windy.com
+
+WindMar is a **local-first** application. Unlike Windy.com which serves pre-rendered tiles from a global CDN:
+
+- **All data is fetched on demand** from NOAA GFS / Copernicus Marine, ingested into a local PostgreSQL, and served from a local API container
+- **The full forecast dataset lives in the browser** — all 41 frames (wind) or 10 frames (ice) are loaded into JavaScript heap memory at once. There is no streaming or tile-based progressive loading.
+- **The heatmap overlay and wind particles are rendered client-side** using Canvas 2D. The browser must decompress, parse, and render the full grid for each frame.
+- **Viewport-based fetching means data stops at the grid edges.** If the user pans beyond the loaded bounds, the overlay is truncated. This is by design — fetching global data would exceed browser memory.
+
+**Practical browser limits observed during testing (Chrome 141, 16 GB RAM system):**
+
+| Viewport Span | Grid Points (0.25 deg) | JSON Response | Browser Behavior |
+|---|---|---|---|
+| 30° × 55° (Europe) | ~26K per component | ~24 MB | Loads in ~3s, smooth animation |
+| 80° × 80° (Indian Ocean) | ~103K per component | ~129 MB | Loads in ~50s, smooth animation |
+| 120° × 120° (max cap) | ~231K per component | ~290 MB (est.) | At browser memory limit |
+| 160° × 260° (uncapped) | ~601K per component | ~627 MB | **Browser OOM crash** |
+
+The MAX_SPAN cap at 120 degrees is a pragmatic limit. Users needing global coverage should zoom to the region of interest before opening the timeline.
 
 ---
 
@@ -278,7 +315,10 @@ The following endpoints were removed in the user-triggered overlay refactor:
 | **First-time CMEMS layer load takes 30-120s** | User waits on first activation if DB empty | Medium |
 | **No SST in DB** (cmems_sst disabled) | SST layer unavailable | Medium |
 | **Full grid decompression in memory** | Memory spikes on concurrent large requests | Medium |
-| **All timeline frames loaded to browser** | Browser memory pressure on large viewports | Medium |
+| **All timeline frames loaded to browser** | Browser memory pressure on large viewports — capped at 120 deg per axis | Medium |
+| **Pan/zoom does not auto-refetch timeline** | Heatmap truncated at grid edges when panning beyond loaded bounds — user must Resync + reopen timeline | By design |
+| **Wind particles may extend beyond heatmap** | leaflet-velocity extrapolates particles past grid edges — cosmetic only | Low |
 | **No per-request memory limit** | Theoretical OOM risk under concurrent load | Low |
 | **Redis not invalidated on resync** | Up to 60 min stale data after resync | Low |
 | **GFS publishes progressively** | Wind may have <41 frames for recent model runs | Informational |
+| **SST/Visibility refTime uses valid_time** | Initial slider position may be off by one frame for SST and Visibility layers | Low |

@@ -39,6 +39,7 @@ export default function HomePage() {
   // Per-layer staleness indicator (ISO timestamp from backend)
   const [layerIngestedAt, setLayerIngestedAt] = useState<string | null>(null);
   const [resyncRunning, setResyncRunning] = useState(false);
+  const resyncRunningRef = useRef(false);
 
   // Weather visualization
   const [weatherLayer, setWeatherLayer] = useState<WeatherLayer>('none');
@@ -140,13 +141,13 @@ export default function HomePage() {
         debugLog('info', 'API', `Wind loaded in ${dt}ms: grid=${wind?.ny}x${wind?.nx}`);
         if (wind) { setWindData(wind); windDataBaseRef.current = wind; }
         if (windVel) setWindVelocityData(windVel);
-        if (wind?.ingested_at) setLayerIngestedAt(wind.ingested_at);
+        if (wind?.ingested_at && !resyncRunningRef.current) setLayerIngestedAt(wind.ingested_at);
       } else if (activeLayer === 'waves') {
         const waves = await apiClient.getWaveField(params).then(orNull);
         const dt = (performance.now() - t0).toFixed(0);
         debugLog('info', 'API', `Waves loaded in ${dt}ms: grid=${waves?.ny}x${waves?.nx}`);
         if (waves) setWaveData(waves);
-        if (waves?.ingested_at) setLayerIngestedAt(waves.ingested_at);
+        if (waves?.ingested_at && !resyncRunningRef.current) setLayerIngestedAt(waves.ingested_at);
       } else if (activeLayer === 'currents') {
         const currentVel = await apiClient.getCurrentVelocity(params).then(orNull).catch(() => null);
         const dt = (performance.now() - t0).toFixed(0);
@@ -157,25 +158,25 @@ export default function HomePage() {
         const dt = (performance.now() - t0).toFixed(0);
         debugLog('info', 'API', `Ice loaded in ${dt}ms: grid=${data?.ny}x${data?.nx}`);
         if (data) setExtendedWeatherData(data);
-        if (data?.ingested_at) setLayerIngestedAt(data.ingested_at);
+        if (data?.ingested_at && !resyncRunningRef.current) setLayerIngestedAt(data.ingested_at);
       } else if (activeLayer === 'visibility') {
         const data = await apiClient.getVisibilityField(params).then(orNull);
         const dt = (performance.now() - t0).toFixed(0);
         debugLog('info', 'API', `Visibility loaded in ${dt}ms: grid=${data?.ny}x${data?.nx}`);
         if (data) setExtendedWeatherData(data);
-        if (data?.ingested_at) setLayerIngestedAt(data.ingested_at);
+        if (data?.ingested_at && !resyncRunningRef.current) setLayerIngestedAt(data.ingested_at);
       } else if (activeLayer === 'sst') {
         const data = await apiClient.getSstField(params).then(orNull);
         const dt = (performance.now() - t0).toFixed(0);
         debugLog('info', 'API', `SST loaded in ${dt}ms: grid=${data?.ny}x${data?.nx}`);
         if (data) setExtendedWeatherData(data);
-        if (data?.ingested_at) setLayerIngestedAt(data.ingested_at);
+        if (data?.ingested_at && !resyncRunningRef.current) setLayerIngestedAt(data.ingested_at);
       } else if (activeLayer === 'swell') {
         const data = await apiClient.getSwellField(params);
         const dt = (performance.now() - t0).toFixed(0);
         debugLog('info', 'API', `Swell loaded in ${dt}ms: grid=${data?.ny}x${data?.nx}`);
         setExtendedWeatherData(data);
-        if (data?.ingested_at) setLayerIngestedAt(data.ingested_at);
+        if (data?.ingested_at && !resyncRunningRef.current) setLayerIngestedAt(data.ingested_at);
       }
     } catch (error) {
       debugLog('error', 'API', `Weather load failed: ${error}`);
@@ -212,10 +213,12 @@ export default function HomePage() {
       if (!field) {
         const nx = hdr.nx;
         const ny = hdr.ny;
-        const lats = Array.from({ length: ny }, (_, j) => hdr.la1 - j * hdr.dy);
-        const lons = Array.from({ length: nx }, (_, i) => hdr.lo1 + i * hdr.dx);
         const flatU = data[0].data;
         const flatV = data[1].data;
+        // Guard: skip if grid dimensions don't match data length (stale frame during pan)
+        if (!nx || !ny || flatU.length < nx * ny || flatV.length < nx * ny) return;
+        const lats = Array.from({ length: ny }, (_, j) => hdr.la1 - j * hdr.dy);
+        const lons = Array.from({ length: nx }, (_, i) => hdr.lo1 + i * hdr.dx);
         const u2d = Array.from({ length: ny }, (_, j) => {
           const off = j * nx;
           return Array.from({ length: nx }, (_, i) => flatU[off + i] ?? 0);
@@ -799,6 +802,7 @@ export default function HomePage() {
             onSaveZone={handleSaveZone}
             onCancelZone={() => setIsDrawingZone(false)}
             forecastEnabled={forecastEnabled}
+            dataTimestamp={layerIngestedAt}
             onForecastClose={() => setForecastEnabled(false)}
             onForecastHourChange={handleForecastHourChange}
             onWaveForecastHourChange={handleWaveForecastHourChange}
@@ -827,13 +831,18 @@ export default function HomePage() {
                 if (weatherLayer === 'none') return;
                 debugLog('info', 'WEATHER', `Resync: re-fetching ${weatherLayer}...`);
                 setResyncRunning(true);
+                resyncRunningRef.current = true;
                 try {
-                  const result = await apiClient.resyncWeatherLayer(weatherLayer);
-                  setLayerIngestedAt(result.ingested_at);
+                  await apiClient.resyncWeatherLayer(weatherLayer);
+                  // Force a unique timestamp so dataTimestamp always changes,
+                  // even when the same GFS model run is re-ingested.
+                  setLayerIngestedAt(new Date().toISOString());
+                  // Reload overlay grid (skip ingested_at overwrite via ref guard)
                   await loadWeatherData(viewportRef.current ?? undefined, weatherLayer);
                 } catch (error) {
                   debugLog('error', 'WEATHER', `Resync failed: ${error}`);
                 } finally {
+                  resyncRunningRef.current = false;
                   setResyncRunning(false);
                 }
               }}

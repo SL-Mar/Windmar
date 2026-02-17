@@ -1393,23 +1393,26 @@ async def api_weather_layer_resync(layer: str):
         weather_ingestion._supersede_old_runs(source)
         weather_ingestion.cleanup_orphaned_grid_data(source)
 
-        # Clear layer-specific frame cache
-        import shutil
+        # Clear layer-specific frame cache (delete files, keep directory)
         cache_dir = Path("/tmp/windmar_cache")
-        # Map layers to cache subdirectory names
         cache_names = {
             "wind": "wind", "waves": "wave", "currents": "current",
-            "ice": "ice", "visibility": "visibility", "swell": "wave",
+            "ice": "ice", "visibility": "vis", "swell": "wave",
         }
         layer_cache = cache_dir / cache_names.get(layer, layer)
         if layer_cache.exists():
-            shutil.rmtree(layer_cache, ignore_errors=True)
+            for f in layer_cache.iterdir():
+                f.unlink(missing_ok=True)
+        else:
+            layer_cache.mkdir(parents=True, exist_ok=True)
 
         # Clean stale file caches
         _cleanup_stale_caches()
 
-        ingested_at = datetime.now(timezone.utc)
-        logger.info(f"Per-layer resync complete: {layer}")
+        # Get actual ingested_at from the newly-created DB run
+        _, db_ingested_at = db_weather._find_latest_run(source)
+        ingested_at = db_ingested_at or datetime.now(timezone.utc)
+        logger.info(f"Per-layer resync complete: {layer}, ingested_at={ingested_at.isoformat()}")
         return {"status": "complete", "ingested_at": ingested_at.isoformat()}
     except Exception as e:
         logger.error(f"Per-layer resync failed ({layer}): {e}")
@@ -1672,7 +1675,7 @@ def _build_wind_frames(lat_min, lat_max, lon_min, lon_max, run_date, run_hour):
             "dy": actual_dy,
             "nx": len(actual_lons),
             "ny": len(actual_lats),
-            "refTime": valid_time.isoformat(),
+            "refTime": run_time.isoformat() if run_time else valid_time.isoformat(),
             "forecastHour": fh,
         }
         frames[str(fh)] = [
@@ -1694,6 +1697,91 @@ def _build_wind_frames(lat_min, lat_max, lon_min, lon_max, run_date, run_hour):
     cache_key = _wind_cache_key(lat_min, lat_max, lon_min, lon_max)
     _wind_cache_put(cache_key, result)
     logger.info(f"Wind frames cache saved: {len(frames)} frames, key={cache_key}")
+    return result
+
+
+def _rebuild_wind_cache_from_db(cache_key, lat_min, lat_max, lon_min, lon_max):
+    """Rebuild wind forecast file cache from PostgreSQL data.
+
+    Fallback when GRIB file cache is missing or partial (e.g. latest GFS
+    run on NOMADS is still publishing). Mirrors the wave/current/ice
+    pattern: read complete DB run → build leaflet-velocity frames → save.
+    """
+    if db_weather is None:
+        return None
+
+    run_time, hours = db_weather.get_available_hours_by_source("gfs")
+    if not hours:
+        return None
+
+    logger.info(f"Rebuilding wind cache from DB: {len(hours)} hours")
+
+    grids = db_weather.get_grids_for_timeline(
+        "gfs", ["wind_u", "wind_v"], lat_min, lat_max, lon_min, lon_max, hours
+    )
+
+    if not grids or "wind_u" not in grids or not grids["wind_u"]:
+        return None
+
+    frames = {}
+    for fh in sorted(hours):
+        if fh not in grids.get("wind_u", {}) or fh not in grids.get("wind_v", {}):
+            continue
+
+        lats, lons, u_data = grids["wind_u"][fh]
+        _, _, v_data = grids["wind_v"][fh]
+
+        u_masked, v_masked = _apply_ocean_mask_velocity(u_data, v_data, lats, lons)
+
+        actual_dx = abs(float(lons[1] - lons[0])) if len(lons) > 1 else 0.25
+        actual_dy = abs(float(lats[1] - lats[0])) if len(lats) > 1 else 0.25
+
+        if len(lats) > 1 and lats[1] > lats[0]:
+            u_ordered = u_masked[::-1]
+            v_ordered = v_masked[::-1]
+            lat_north = float(lats[-1])
+            lat_south = float(lats[0])
+        else:
+            u_ordered = u_masked
+            v_ordered = v_masked
+            lat_north = float(lats[0])
+            lat_south = float(lats[-1])
+
+        valid_time = run_time + timedelta(hours=fh) if run_time else datetime.utcnow()
+        header = {
+            "parameterCategory": 2,
+            "parameterNumber": 2,
+            "lo1": float(lons[0]),
+            "la1": lat_north,
+            "lo2": float(lons[-1]),
+            "la2": lat_south,
+            "dx": actual_dx,
+            "dy": actual_dy,
+            "nx": len(lons),
+            "ny": len(lats),
+            "refTime": run_time.isoformat() if run_time else valid_time.isoformat(),
+            "forecastHour": fh,
+        }
+        frames[str(fh)] = [
+            {"header": {**header, "parameterNumber": 2}, "data": u_ordered.flatten().tolist()},
+            {"header": {**header, "parameterNumber": 3}, "data": v_ordered.flatten().tolist()},
+        ]
+
+    run_date_str = run_time.strftime("%Y%m%d") if run_time else ""
+    run_hour_str = run_time.strftime("%H") if run_time else "00"
+
+    result = {
+        "run_date": run_date_str,
+        "run_hour": run_hour_str,
+        "run_time": run_time.isoformat() if run_time else "",
+        "total_hours": len(GFSDataProvider.FORECAST_HOURS),
+        "cached_hours": len(frames),
+        "source": "gfs",
+        "frames": frames,
+    }
+
+    _wind_cache_put(cache_key, result)
+    logger.info(f"Wind cache rebuilt from DB: {len(frames)} frames")
     return result
 
 
@@ -1746,6 +1834,22 @@ async def api_get_forecast_status(
             hours = gfs_provider.get_cached_forecast_hours(lat_min, lat_max, lon_min, lon_max, run_date, run_hour)
     cached_count = sum(1 for h in hours if h["cached"])
     total_count = len(hours)
+
+    # If GRIB cache is empty but DB has data, report DB availability
+    # so the frontend knows frames will be served via DB fallback
+    if cached_count == 0 and db_weather is not None:
+        db_run_time, db_hours = db_weather.get_available_hours_by_source("gfs")
+        if db_hours:
+            db_run_date = db_run_time.strftime("%Y%m%d") if db_run_time else run_date
+            db_run_hour = db_run_time.strftime("%H") if db_run_time else run_hour
+            return {
+                "run_date": db_run_date,
+                "run_hour": db_run_hour,
+                "total_hours": len(GFSDataProvider.FORECAST_HOURS),
+                "cached_hours": len(db_hours),
+                "complete": True,
+                "prefetch_running": False,
+            }
 
     return {
         "run_date": run_date,
@@ -1822,12 +1926,17 @@ async def api_get_forecast_frames(
     cache_key = _wind_cache_key(lat_min, lat_max, lon_min, lon_max)
     cache_file = _WIND_CACHE_DIR / f"{cache_key}.json"
     if cache_file.exists():
-        if _is_cache_complete(cache_file):
-            return Response(content=cache_file.read_bytes(), media_type="application/json")
-        logger.warning("Wind cache %s is partial — deleting", cache_key)
-        cache_file.unlink(missing_ok=True)
+        return Response(content=cache_file.read_bytes(), media_type="application/json")
 
-    # No file cache — return empty (prefetch hasn't run or hasn't finished yet)
+    # No file cache — fallback: rebuild from PostgreSQL
+    cached = await asyncio.to_thread(
+        _rebuild_wind_cache_from_db, cache_key, lat_min, lat_max, lon_min, lon_max
+    )
+
+    if cached:
+        return cached
+
+    # No DB data either — return empty
     run_date, run_hour = gfs_provider._get_latest_run()
     run_time = datetime.strptime(f"{run_date}{run_hour}", "%Y%m%d%H")
     return {
@@ -5363,8 +5472,11 @@ def _is_wave_prefetch_running() -> bool:
 
 @app.on_event("startup")
 async def startup_event():
-    """Run database migrations on startup."""
+    """Run database migrations and ensure cache directories exist on startup."""
     _run_weather_migrations()
+    # Ensure cache dirs exist (volume mounts may lack subdirectories)
+    for sub in ("wind", "wave", "current", "ice", "sst", "vis"):
+        Path(f"/tmp/windmar_cache/{sub}").mkdir(parents=True, exist_ok=True)
 
 
 def _cleanup_stale_caches():

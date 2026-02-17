@@ -103,6 +103,7 @@ export interface MapComponentProps {
   extendedWeatherData?: any;
   fitBounds?: [[number, number], [number, number]] | null;
   fitKey?: number;
+  dataTimestamp?: string | null;
   children?: React.ReactNode;
 }
 
@@ -138,6 +139,7 @@ export default function MapComponent({
   extendedWeatherData = null,
   fitBounds: fitBoundsProp = null,
   fitKey = 0,
+  dataTimestamp = null,
   children,
 }: MapComponentProps) {
   const [isMounted, setIsMounted] = useState(false);
@@ -293,6 +295,7 @@ export default function MapComponent({
           layerType={(['wind', 'waves', 'currents', 'ice', 'swell', 'sst', 'visibility'] as const).includes(weatherLayer as any) ? weatherLayer as any : 'wind'}
           displayLayerName={{ wind: 'Wind Speed', waves: 'Waves', currents: 'Currents', ice: 'Ice', visibility: 'Visibility', sst: 'Sea Surface Temp', swell: 'Swell', none: undefined }[weatherLayer]}
           viewportBounds={viewportBounds}
+          dataTimestamp={dataTimestamp}
         />
       )}
     </div>
