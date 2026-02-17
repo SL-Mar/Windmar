@@ -809,34 +809,54 @@ class WeatherIngestionService:
         """zlib-compress a numpy array (stored as float32 to halve size)."""
         return zlib.compress(arr.astype(np.float32).tobytes())
 
-    def _supersede_old_runs(self):
-        """Mark runs older than 24h as 'superseded'."""
+    def _supersede_old_runs(self, source: str | None = None):
+        """Mark runs older than 24h as 'superseded'.
+
+        Args:
+            source: If provided, only supersede runs for this source.
+                    If None, supersede across all sources (legacy behavior).
+        """
         conn = self._get_conn()
         try:
             cur = conn.cursor()
             cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-            cur.execute(
-                """UPDATE weather_forecast_runs
-                   SET status = 'superseded'
-                   WHERE status = 'complete'
-                     AND ingested_at < %s""",
-                (cutoff,),
-            )
+            if source is not None:
+                cur.execute(
+                    """UPDATE weather_forecast_runs
+                       SET status = 'superseded'
+                       WHERE status = 'complete'
+                         AND source = %s
+                         AND ingested_at < %s""",
+                    (source, cutoff),
+                )
+            else:
+                cur.execute(
+                    """UPDATE weather_forecast_runs
+                       SET status = 'superseded'
+                       WHERE status = 'complete'
+                         AND ingested_at < %s""",
+                    (cutoff,),
+                )
             superseded = cur.rowcount
             conn.commit()
             if superseded > 0:
-                logger.info(f"Superseded {superseded} old weather runs")
+                scope = source or "all"
+                logger.info(f"Superseded {superseded} old weather runs (scope={scope})")
         except Exception as e:
             logger.error(f"Failed to supersede old runs: {e}")
             conn.rollback()
         finally:
             conn.close()
 
-    def cleanup_orphaned_grid_data(self):
+    def cleanup_orphaned_grid_data(self, source: str | None = None):
         """Delete grid data rows belonging to superseded, failed, or stale ingesting runs.
 
         This reclaims TOAST storage from dead runs. Should be called after
         _supersede_old_runs() in each ingestion cycle.
+
+        Args:
+            source: If provided, only clean up runs for this source.
+                    If None, clean up across all sources (legacy behavior).
 
         Note: PostgreSQL does not release disk space from TOAST deletes until
         autovacuum runs (or manual VACUUM). Large deletes may cause temporary
@@ -845,41 +865,50 @@ class WeatherIngestionService:
         conn = self._get_conn()
         try:
             cur = conn.cursor()
+            source_clause = "AND source = %s" if source else ""
+            source_params: tuple = (source,) if source else ()
+
             # Delete grid data for superseded and failed runs
             cur.execute(
-                """DELETE FROM weather_grid_data
+                f"""DELETE FROM weather_grid_data
                    WHERE run_id IN (
                        SELECT id FROM weather_forecast_runs
                        WHERE status IN ('superseded', 'failed')
-                   )"""
+                       {source_clause}
+                   )""",
+                source_params,
             )
             deleted_dead = cur.rowcount
 
             # Delete grid data for ingesting runs older than 6h (stale/abandoned)
             cutoff = datetime.now(timezone.utc) - timedelta(hours=6)
             cur.execute(
-                """DELETE FROM weather_grid_data
+                f"""DELETE FROM weather_grid_data
                    WHERE run_id IN (
                        SELECT id FROM weather_forecast_runs
                        WHERE status = 'ingesting'
                          AND ingested_at < %s
+                         {source_clause}
                    )""",
-                (cutoff,),
+                (cutoff, *source_params),
             )
             deleted_stale = cur.rowcount
 
             # Now delete the orphaned run metadata too
             cur.execute(
-                """DELETE FROM weather_forecast_runs
-                   WHERE status IN ('superseded', 'failed')"""
+                f"""DELETE FROM weather_forecast_runs
+                   WHERE status IN ('superseded', 'failed')
+                   {source_clause}""",
+                source_params,
             )
             deleted_runs_dead = cur.rowcount
 
             cur.execute(
-                """DELETE FROM weather_forecast_runs
+                f"""DELETE FROM weather_forecast_runs
                    WHERE status = 'ingesting'
-                     AND ingested_at < %s""",
-                (cutoff,),
+                     AND ingested_at < %s
+                     {source_clause}""",
+                (cutoff, *source_params),
             )
             deleted_runs_stale = cur.rowcount
 
@@ -887,8 +916,9 @@ class WeatherIngestionService:
             total_grids = deleted_dead + deleted_stale
             total_runs = deleted_runs_dead + deleted_runs_stale
             if total_grids > 0 or total_runs > 0:
+                scope = source or "all"
                 logger.info(
-                    f"Orphan cleanup: deleted {total_grids} grid rows "
+                    f"Orphan cleanup (scope={scope}): deleted {total_grids} grid rows "
                     f"and {total_runs} run records "
                     f"(superseded/failed={deleted_dead}, stale_ingesting={deleted_stale})"
                 )

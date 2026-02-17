@@ -35,13 +35,49 @@ The pipeline uses a **user-triggered overlay model**: no background ingestion lo
 
 ---
 
-## 3. Storage Tiers
+## 3. Source Independence — Architectural Decision
+
+The 6 weather sources (gfs, cmems_wave, cmems_current, cmems_ice, gfs_visibility, cmems_sst) are **logically independent within a shared database**.
+
+### Design Choice: Shared Tables, Scoped Operations
+
+All sources share two PostgreSQL tables (`weather_forecast_runs` + `weather_grid_data`), discriminated by a `source` column. This was chosen over 6 separate databases because:
+
+1. **No cross-source JOINs exist.** Every DB query is scoped to a single source via `WHERE source = %s`. The `_find_latest_run(source)` method resolves each source independently.
+
+2. **Routing merges in-memory, not in SQL.** `RouteWeatherAssessment.provision()` issues 3 separate `get_grids_for_timeline()` calls (wind, wave, current), then combines results into a `TemporalGridWeatherProvider`. No query ever joins wind rows with wave rows.
+
+3. **Partial availability is handled gracefully.** The provisioner succeeds if at least wind or wave is available. Missing wind triggers a live GFS supplement. Missing current means currents are ignored. Each source failing does not block the others.
+
+4. **6 separate databases would add complexity for no functional gain.** Connection pooling x6, health checks x6, VACUUM scheduling x6 — all for data that's already logically isolated by a column value.
+
+### Isolation Guarantees
+
+| Operation | Scope | Cross-source impact |
+|---|---|---|
+| `ingest_wind(force=True)` | Supersedes only `gfs` runs | None — other sources untouched |
+| `POST /api/weather/wind/resync` | Supersedes + cleans only `gfs` | None — scoped `source` param |
+| `_supersede_old_runs(source)` | Marks old runs for given source | None — `WHERE source = %s` |
+| `cleanup_orphaned_grid_data(source)` | Deletes dead data for given source | None — `WHERE source = %s` |
+| Layer toggle (frontend) | Queries only relevant source | None — each endpoint hits one source |
+| Voyage calculation | Queries 3 sources independently | None — separate DB calls merged in-memory |
+
+### What Is NOT Independent
+
+- **VACUUM FULL** requires a table-wide lock — cannot vacuum one source's TOAST data without locking all sources' data. Autovacuum handles this incrementally without user impact.
+- **File cache cleanup** (`_cleanup_stale_caches()`) operates globally on `/tmp/windmar_cache/` — but only removes files older than 12h, which is safe regardless of source.
+
+---
+
+## 4. Storage Tiers
 
 ### Tier 1 — PostgreSQL (persistent, authoritative)
 
 **Tables:**
 - `weather_forecast_runs` — one row per source per ingestion cycle (metadata: source, run_time, status, bounds, forecast_hours array, `ingested_at`)
 - `weather_grid_data` — one row per (run, forecast_hour, parameter), storing compressed grid arrays
+
+**Source column:** All queries include `WHERE source = %s` to ensure per-source isolation. No cross-source JOINs exist anywhere in the codebase.
 
 **Compression:** All grid data stored as zlib-compressed float32 numpy arrays in `bytea` columns. Coordinate arrays (lats, lons) stored separately per row. Data lives in PostgreSQL TOAST storage (out-of-line).
 
@@ -72,7 +108,7 @@ The pipeline uses a **user-triggered overlay model**: no background ingestion lo
 
 ---
 
-## 4. Ingestion Model
+## 5. Ingestion Model
 
 ### On-Demand (DB-first with API fallback)
 
@@ -87,9 +123,12 @@ When a user activates a weather layer:
 
 **Behavior:**
 1. Call the layer's ingest function with `force=True` (bypasses freshness checks)
-2. Supersede old runs, clean up orphaned grid data
-3. Clear stale cache files
-4. Return `{ "status": "complete", "ingested_at": "<ISO>" }`
+2. Supersede old runs **for this source only** (`_supersede_old_runs(source)`)
+3. Clean up orphaned grid data **for this source only** (`cleanup_orphaned_grid_data(source)`)
+4. Clear the layer's frame cache + stale file caches
+5. Return `{ "status": "complete", "ingested_at": "<ISO>" }`
+
+**Source isolation:** Resyncing Wind never touches Wave/Current/Ice data. The `source` parameter scopes both supersede and cleanup operations to the specific DB source (`gfs`, `cmems_wave`, etc.).
 
 **Timeout:** Can take 30-120s for CMEMS layers (network + processing).
 
@@ -98,18 +137,18 @@ When a user activates a weather layer:
 When a new run is ingested for a source:
 1. All previous `complete` runs for that source are marked `status = 'superseded'`
 2. The new run is marked `complete` after all frames are inserted
-3. After resync, `_supersede_old_runs()` + `cleanup_orphaned_grid_data()` run to remove stale data
+3. After resync, `_supersede_old_runs(source)` + `cleanup_orphaned_grid_data(source)` run scoped to that source
 
 ### What Gets Cleaned and When
 
 | Event | DB Runs | DB Grid Data | File Cache | Redis | Raw Downloads |
 |---|---|---|---|---|---|
-| **Per-layer resync** | Old runs superseded | Orphans cleaned | Stale files (>12h) removed | Untouched | Stale files removed |
+| **Per-layer resync** | Old runs superseded (scoped) | Orphans cleaned (scoped) | Layer cache wiped + stale removed | Untouched | Stale files removed |
 | **Container restart** | Persisted | Persisted | **Lost** (`/tmp/`) | Persisted (Redis volume) | Persisted (`data/` volume) |
 
 ---
 
-## 5. Frontend Data Flow
+## 6. Frontend Data Flow
 
 ### App Startup
 
@@ -149,7 +188,7 @@ Only available when a layer is active (button hidden when `weatherLayer === 'non
 
 ---
 
-## 6. `ingested_at` Propagation
+## 7. `ingested_at` Propagation
 
 Every weather endpoint now returns an `ingested_at` ISO timestamp alongside the grid data.
 
@@ -166,7 +205,7 @@ Every weather endpoint now returns an `ingested_at` ISO timestamp alongside the 
 
 ---
 
-## 7. Memory & Performance Constraints
+## 8. Memory & Performance Constraints
 
 ### API Container Memory
 
@@ -193,7 +232,7 @@ If the DB is empty for a given source, the first layer activation triggers an ex
 
 ---
 
-## 8. API Endpoints (Weather Pipeline)
+## 9. API Endpoints (Weather Pipeline)
 
 | Endpoint | Method | Purpose |
 |---|---|---|
@@ -232,7 +271,7 @@ The following endpoints were removed in the user-triggered overlay refactor:
 
 ---
 
-## 9. Limitations Summary
+## 10. Limitations Summary
 
 | Limitation | Impact | Severity |
 |---|---|---|

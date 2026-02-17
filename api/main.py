@@ -1388,9 +1388,10 @@ async def api_weather_layer_resync(layer: str):
         ingest_fn = _LAYER_INGEST_FN[layer]
         await asyncio.to_thread(ingest_fn, weather_ingestion)
 
-        # Supersede old runs and clean orphans
-        weather_ingestion._supersede_old_runs()
-        weather_ingestion.cleanup_orphaned_grid_data()
+        # Supersede old runs and clean orphans — scoped to this source only
+        source = _LAYER_TO_SOURCE[layer]
+        weather_ingestion._supersede_old_runs(source)
+        weather_ingestion.cleanup_orphaned_grid_data(source)
 
         # Clear layer-specific frame cache
         import shutil
