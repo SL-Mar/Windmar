@@ -6162,7 +6162,7 @@ async def get_engine_log_entries(
     date_to: Optional[datetime] = Query(None, description="End date"),
     min_rpm: Optional[float] = Query(None, ge=0, description="Minimum RPM"),
     batch_id: Optional[str] = Query(None, description="Filter by batch UUID"),
-    limit: int = Query(100, ge=1, le=1000),
+    limit: int = Query(100, ge=1, le=5000),
     offset: int = Query(0, ge=0),
     db=Depends(get_db),
 ):
