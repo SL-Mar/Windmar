@@ -169,7 +169,7 @@ Include your API key in the `X-API-Key` header.
 - 1000 requests per hour
 
 ### Support
-Contact: support@windmar.io
+Contact: contact@slmar.co
         """,
         version="2.1.0",
         docs_url="/api/docs",
@@ -182,7 +182,7 @@ Contact: support@windmar.io
         contact={
             "name": "WINDMAR Support",
             "url": "https://windmar.io",
-            "email": "support@windmar.io",
+            "email": "contact@slmar.co",
         },
     )
 
