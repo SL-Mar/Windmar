@@ -98,11 +98,19 @@ class VisirOptimizer(BaseOptimizer):
     SPEED_RANGE_KTS = (10.0, 18.0)  # practical speed range for graph exploration
     SPEED_STEPS = 3                  # candidate speeds per edge
 
-    # 8-connected grid directions (row_delta, col_delta)
-    # Diagonals are checked first to prefer direct-line progress
+    # Time penalty weight: same as A* engine — allows weather-avoidance detours.
+    TIME_PENALTY_WEIGHT = 0.3
+
+    # 16-connected grid: 4 cardinal + 4 diagonal + 8 knight-move directions.
+    # Knight moves enable ~26° and ~63° headings for smoother paths.
     DIRECTIONS = [
-        (-1, 1), (1, 1), (-1, -1), (1, -1),
+        # Cardinal (4)
         (-1, 0), (0, 1), (1, 0), (0, -1),
+        # Diagonal (4)
+        (-1, 1), (1, 1), (1, -1), (-1, -1),
+        # Knight moves (8)
+        (-2, 1), (-1, 2), (1, 2), (2, 1),
+        (2, -1), (1, -2), (-1, -2), (-2, -1),
     ]
 
     def __init__(
@@ -398,14 +406,13 @@ class VisirOptimizer(BaseOptimizer):
             row=start_rc[0], col=start_rc[1], time_step=0,
         )
 
-        # Time-value penalty: each extra hour "costs" the fuel of 1 hour at
-        # calm speed.  This prevents slow-steaming by making detour time
-        # expensive, the same approach used by the A* engine.
+        # Time-value penalty scaled by TIME_PENALTY_WEIGHT to allow
+        # weather-avoidance detours (same approach as the A* engine).
         service_fuel_res = self.vessel_model.calculate_fuel_consumption(
             speed_kts=calm_speed_kts, is_laden=is_laden,
             weather=None, distance_nm=calm_speed_kts,  # 1 hour
         )
-        lambda_time = service_fuel_res["fuel_mt"]
+        lambda_time = service_fuel_res["fuel_mt"] * self.TIME_PENALTY_WEIGHT
 
         # Compute admissible heuristic: min (fuel + time penalty) per nm
         # in calm conditions across all candidate speeds

@@ -1,10 +1,10 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   Navigation, Clock, Fuel, Ship, Loader2, Trash2,
   Upload, Play, Zap, Dice5, ExternalLink, Eye, EyeOff,
-  PenLine, MapPin, Download, FolderOpen, Check, X,
+  PenLine, MapPin, Download, FolderOpen, Check, X, CheckCircle,
 } from 'lucide-react';
 import Link from 'next/link';
 import RouteImport, { SampleRTZButton } from '@/components/RouteImport';
@@ -12,6 +12,7 @@ import { useVoyage } from '@/components/VoyageContext';
 import {
   Position, AllOptimizationResults, OptimizedRouteKey,
   RouteVisibility, ROUTE_STYLES, EMPTY_ALL_RESULTS,
+  CalibrationStatus, apiClient,
 } from '@/lib/api';
 import { AnalysisEntry } from '@/lib/analysisStorage';
 
@@ -67,6 +68,11 @@ export default function AnalysisPanel({
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   const loadFileRef = useRef<HTMLInputElement>(null);
+  const [calibration, setCalibration] = useState<CalibrationStatus | null>(null);
+
+  useEffect(() => {
+    apiClient.getCalibration().then(setCalibration).catch(() => {});
+  }, []);
 
   const hasRoute = waypoints.length >= 2;
   const hasBaseline = !!displayedAnalysis;
@@ -239,6 +245,24 @@ export default function AnalysisPanel({
             {hasBaseline && (
               <div className="p-3 rounded-lg bg-primary-500/5 border border-primary-500/20 space-y-2">
                 <div className="text-xs font-medium text-primary-400 mb-1">Voyage Summary</div>
+                {/* Calibration indicator */}
+                {calibration && (
+                  <div className={`flex items-center gap-1.5 text-[10px] mb-1 ${
+                    calibration.calibrated ? 'text-green-400' : 'text-gray-500'
+                  }`}>
+                    {calibration.calibrated ? (
+                      <>
+                        <CheckCircle className="w-3 h-3" />
+                        <span>
+                          Calibrated model ({calibration.num_reports_used} reports
+                          {calibration.calibrated_at && `, ${new Date(calibration.calibrated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`})
+                        </span>
+                      </>
+                    ) : (
+                      <span>Theoretical model (uncalibrated)</span>
+                    )}
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-2">
                   <MetricItem
                     icon={<Clock className="w-3 h-3" />}
@@ -290,64 +314,102 @@ export default function AnalysisPanel({
             </button>
 
             {/* ── Optimization Results ── */}
-            {hasOptimized && (
-              <div className="space-y-2">
-                <div className="text-xs font-medium text-gray-300">Optimized Routes</div>
-                {(['astar', 'visir'] as const).map(engine => {
-                  const keys = [`${engine}_fuel`, `${engine}_balanced`, `${engine}_safety`] as OptimizedRouteKey[];
-                  const hasAny = keys.some(k => allResults[k]);
-                  if (!hasAny) return null;
-                  return (
-                    <div key={engine} className="space-y-1">
-                      <div className="text-[10px] text-gray-500 uppercase tracking-wider">
-                        {engine === 'astar' ? 'A*' : 'VISIR'}
+            {hasOptimized && (() => {
+              const baselineFuel = hasBaseline ? displayedAnalysis!.result.total_fuel_mt : null;
+
+              // Count how many routes actually save fuel
+              const fuelSavingCount = baselineFuel
+                ? Object.values(allResults).filter(r => r && r.total_fuel_mt < baselineFuel).length
+                : 0;
+
+              return (
+                <div className="space-y-2">
+                  <div className="text-xs font-medium text-gray-300">Optimized Routes</div>
+                  {(['astar', 'visir'] as const).map(engine => {
+                    const keys = [`${engine}_fuel`, `${engine}_balanced`, `${engine}_safety`] as OptimizedRouteKey[];
+                    const hasAny = keys.some(k => allResults[k]);
+                    if (!hasAny) return null;
+
+                    // Filter routes: show fuel-saving routes always, show safety routes
+                    // with clear labeling even if they cost more
+                    const visibleKeys = keys.filter(key => {
+                      const r = allResults[key];
+                      if (!r || !baselineFuel) return !!r;
+                      const weight = key.split('_')[1];
+                      const isSafetyRoute = weight === 'balanced' || weight === 'safety';
+                      const savesFuel = r.total_fuel_mt < baselineFuel;
+                      return savesFuel || isSafetyRoute;
+                    });
+
+                    if (visibleKeys.length === 0) return null;
+
+                    return (
+                      <div key={engine} className="space-y-1">
+                        <div className="text-[10px] text-gray-500 uppercase tracking-wider">
+                          {engine === 'astar' ? 'A*' : 'VISIR'}
+                        </div>
+                        {visibleKeys.map(key => {
+                          const r = allResults[key]!;
+                          const weight = key.split('_')[1];
+                          const style = ROUTE_STYLES[key];
+                          const vis = routeVisibility[key];
+                          const fuelDeltaPct = baselineFuel
+                            ? (r.total_fuel_mt - baselineFuel) / baselineFuel * 100
+                            : null;
+                          const savesFuel = fuelDeltaPct !== null && fuelDeltaPct < 0;
+                          const isSafetyRoute = weight === 'balanced' || weight === 'safety';
+                          const routeLabel = savesFuel
+                            ? WEIGHT_LABELS[weight]
+                            : isSafetyRoute
+                              ? `${WEIGHT_LABELS[weight]} (safer)`
+                              : WEIGHT_LABELS[weight];
+
+                          return (
+                            <div key={key} className="flex items-center gap-2 px-2 py-1.5 rounded bg-white/5 text-xs">
+                              <button
+                                onClick={() => onRouteVisibilityChange({ ...routeVisibility, [key]: !vis })}
+                                className="text-gray-400 hover:text-white"
+                              >
+                                {vis ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+                              </button>
+                              <div className="w-3 h-0.5 rounded" style={{ backgroundColor: style.color }} />
+                              <span className="text-gray-300 flex-1">{routeLabel}</span>
+                              <span className="text-gray-400">{r.total_fuel_mt.toFixed(1)} MT</span>
+                              {fuelDeltaPct !== null && (
+                                <span className={`text-[10px] ${fuelDeltaPct < 0 ? 'text-green-400' : 'text-amber-400'}`}>
+                                  {fuelDeltaPct > 0 ? '+' : ''}{fuelDeltaPct.toFixed(1)}%
+                                </span>
+                              )}
+                              <button
+                                onClick={() => onApplyRoute(key)}
+                                className="text-primary-400 hover:text-primary-300"
+                                title="Apply this route"
+                              >
+                                <Play className="w-3 h-3" />
+                              </button>
+                            </div>
+                          );
+                        })}
                       </div>
-                      {keys.map(key => {
-                        const r = allResults[key];
-                        if (!r) return null;
-                        const weight = key.split('_')[1];
-                        const style = ROUTE_STYLES[key];
-                        const vis = routeVisibility[key];
-                        const fuelDelta = hasBaseline
-                          ? ((r.total_fuel_mt - displayedAnalysis!.result.total_fuel_mt) / displayedAnalysis!.result.total_fuel_mt * 100).toFixed(1)
-                          : null;
-                        return (
-                          <div key={key} className="flex items-center gap-2 px-2 py-1.5 rounded bg-white/5 text-xs">
-                            <button
-                              onClick={() => onRouteVisibilityChange({ ...routeVisibility, [key]: !vis })}
-                              className="text-gray-400 hover:text-white"
-                            >
-                              {vis ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
-                            </button>
-                            <div className="w-3 h-0.5 rounded" style={{ backgroundColor: style.color }} />
-                            <span className="text-gray-300 flex-1">{WEIGHT_LABELS[weight]}</span>
-                            <span className="text-gray-400">{r.total_fuel_mt.toFixed(1)} MT</span>
-                            {fuelDelta && (
-                              <span className={`text-[10px] ${parseFloat(fuelDelta) < 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                {parseFloat(fuelDelta) > 0 ? '+' : ''}{fuelDelta}%
-                              </span>
-                            )}
-                            <button
-                              onClick={() => onApplyRoute(key)}
-                              className="text-primary-400 hover:text-primary-300"
-                              title="Apply this route"
-                            >
-                              <Play className="w-3 h-3" />
-                            </button>
-                          </div>
-                        );
-                      })}
+                    );
+                  })}
+
+                  {/* No fuel-saving route found message */}
+                  {baselineFuel && fuelSavingCount === 0 && (
+                    <div className="px-3 py-2 rounded bg-white/5 border border-white/10 text-xs text-gray-400 text-center">
+                      No fuel-saving route found — base route is near-optimal for current conditions
                     </div>
-                  );
-                })}
-                <button
-                  onClick={onDismissRoutes}
-                  className="w-full text-xs text-gray-500 hover:text-gray-300 py-1 transition-colors"
-                >
-                  Dismiss optimized routes
-                </button>
-              </div>
-            )}
+                  )}
+
+                  <button
+                    onClick={onDismissRoutes}
+                    className="w-full text-xs text-gray-500 hover:text-gray-300 py-1 transition-colors"
+                  >
+                    Dismiss optimized routes
+                  </button>
+                </div>
+              );
+            })()}
 
             {/* ── Run Simulations (Monte Carlo) ── */}
             {hasBaseline && (

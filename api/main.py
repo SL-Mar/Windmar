@@ -5421,6 +5421,97 @@ async def get_vessel_model_status():
     }
 
 
+@app.get("/api/vessel/model-curves", tags=["Vessel"])
+async def get_vessel_model_curves():
+    """
+    Pre-computed model curves for frontend charting.
+
+    Returns speed-indexed arrays for resistance, power, SFOC, and fuel
+    consumption — both theoretical (calibration=1.0) and with current
+    calibration factors applied.
+    """
+    import numpy as np
+
+    specs = current_vessel_specs
+    model = current_vessel_model
+    cal = current_calibration
+
+    # Speed range: 5-16 kts in 0.5 kts steps
+    speeds = list(np.arange(5.0, 16.5, 0.5))
+
+    resistance_theoretical = []
+    resistance_calibrated = []
+    power_kw_list = []
+    sfoc_gkwh_list = []
+    fuel_mt_per_day_list = []
+
+    for spd in speeds:
+        # Theoretical (no calibration)
+        speed_ms = spd * 0.51444
+        draft = specs.draft_laden
+        displacement = specs.displacement_laden
+        cb = specs.cb_laden
+        ws = specs.wetted_surface_laden
+        r_theo = model._holtrop_mennen_resistance(speed_ms, draft, displacement, cb, ws)
+        resistance_theoretical.append(round(r_theo / 1000.0, 2))  # kN
+
+        # Calibrated
+        r_cal = r_theo * model.calibration_factors.get("calm_water", 1.0)
+        resistance_calibrated.append(round(r_cal / 1000.0, 2))  # kN
+
+        # Power and fuel from the full model (uses calibration)
+        result = model.calculate_fuel_consumption(
+            speed_kts=spd, is_laden=True, distance_nm=spd * 24,
+        )
+        power_kw_list.append(round(result["power_kw"], 0))
+
+        load = min(result["power_kw"] / specs.mcr_kw, 1.0)
+        sfoc = model._sfoc_curve(load)
+        sfoc_gkwh_list.append(round(sfoc, 1))
+
+        fuel_mt_per_day_list.append(round(result["fuel_mt"], 2))
+
+    # SFOC vs engine load (15-100%)
+    sfoc_loads = list(range(15, 105, 5))
+    sfoc_at_loads = []
+    sfoc_at_loads_theoretical = []
+    for load_pct in sfoc_loads:
+        lf = load_pct / 100.0
+        # Theoretical (sfoc_factor=1.0)
+        if lf < 0.75:
+            theo = specs.sfoc_at_mcr * (1.0 + 0.15 * (0.75 - lf))
+        else:
+            theo = specs.sfoc_at_mcr * (1.0 + 0.05 * (lf - 0.75))
+        sfoc_at_loads_theoretical.append(round(theo, 1))
+        sfoc_at_loads.append(round(theo * model.calibration_factors.get("sfoc_factor", 1.0), 1))
+
+    return {
+        "speed_range_kts": [round(s, 1) for s in speeds],
+        "resistance_theoretical_kn": resistance_theoretical,
+        "resistance_calibrated_kn": resistance_calibrated,
+        "power_kw": power_kw_list,
+        "sfoc_gkwh": sfoc_gkwh_list,
+        "fuel_mt_per_day": fuel_mt_per_day_list,
+        "sfoc_curve": {
+            "load_pct": sfoc_loads,
+            "sfoc_theoretical_gkwh": sfoc_at_loads_theoretical,
+            "sfoc_calibrated_gkwh": sfoc_at_loads,
+        },
+        "calibration": {
+            "calibrated": cal is not None,
+            "factors": {
+                "calm_water": cal.calm_water if cal else 1.0,
+                "wind": cal.wind if cal else 1.0,
+                "waves": cal.waves if cal else 1.0,
+                "sfoc_factor": cal.sfoc_factor if cal else 1.0,
+            },
+            "calibrated_at": cal.calibrated_at.isoformat() if cal and cal.calibrated_at else None,
+            "num_reports_used": cal.num_reports_used if cal else 0,
+            "calibration_error_mt": cal.calibration_error if cal else 0.0,
+        },
+    }
+
+
 @app.get("/api/vessel/fuel-scenarios", tags=["Vessel"])
 async def get_fuel_scenarios():
     """
@@ -5887,7 +5978,7 @@ def _is_wave_prefetch_running() -> bool:
 async def startup_event():
     """Run migrations, load persisted vessel specs, and start background weather ingestion."""
     global current_vessel_specs, current_vessel_model, voyage_calculator
-    global route_optimizer, visir_optimizer, vessel_calibrator
+    global route_optimizer, visir_optimizer, vessel_calibrator, current_calibration
 
     _run_weather_migrations()
 
@@ -5911,6 +6002,30 @@ async def startup_event():
                         saved_specs.get("mcr_kw"), saved_specs.get("service_speed_laden"))
     except Exception as e:
         logger.warning("Could not load vessel specs from DB (using defaults): %s", e)
+
+    # Auto-load saved calibration from disk (survives container restarts)
+    try:
+        _saved_cal = vessel_calibrator.load_calibration("default")
+        if _saved_cal is not None:
+            current_calibration = _saved_cal
+            current_vessel_model = VesselModel(
+                specs=current_vessel_specs,
+                calibration_factors={
+                    'calm_water': _saved_cal.calm_water,
+                    'wind': _saved_cal.wind,
+                    'waves': _saved_cal.waves,
+                    'sfoc_factor': _saved_cal.sfoc_factor,
+                }
+            )
+            voyage_calculator = VoyageCalculator(vessel_model=current_vessel_model)
+            route_optimizer = RouteOptimizer(vessel_model=current_vessel_model)
+            visir_optimizer = VisirOptimizer(vessel_model=current_vessel_model)
+            logger.info(
+                "Auto-loaded calibration: calm_water=%.4f, sfoc_factor=%.4f, reports=%d",
+                _saved_cal.calm_water, _saved_cal.sfoc_factor, _saved_cal.num_reports_used,
+            )
+    except Exception as e:
+        logger.warning("Could not auto-load calibration (using theoretical): %s", e)
 
     logger.info("Startup complete")
 

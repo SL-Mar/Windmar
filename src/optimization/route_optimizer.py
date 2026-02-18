@@ -101,11 +101,22 @@ class RouteOptimizer(BaseOptimizer):
     DEFAULT_RESOLUTION_DEG = 0.2  # Grid cell size in degrees (~12nm at equator)
     DEFAULT_MAX_CELLS = 200_000  # Maximum cells to explore before giving up
 
-    # Neighbor directions (8-connected grid)
-    # (row_delta, col_delta) for N, NE, E, SE, S, SW, W, NW
+    # Time penalty weight: fraction of full service-speed fuel rate applied per
+    # hour of additional voyage time.  Lower values allow the optimizer to
+    # explore weather-avoidance detours that add time but save fuel.
+    # 0 = no time penalty (pure fuel), 1.0 = full penalty (original behaviour).
+    TIME_PENALTY_WEIGHT = 0.3
+
+    # 16-connected grid: 4 cardinal + 4 diagonal + 8 knight-move directions.
+    # Knight moves enable ~26° and ~63° headings for smoother paths.
     DIRECTIONS = [
-        (-1, 0), (-1, 1), (0, 1), (1, 1),
-        (1, 0), (1, -1), (0, -1), (-1, -1)
+        # Cardinal (4)
+        (-1, 0), (0, 1), (1, 0), (0, -1),
+        # Diagonal (4)
+        (-1, 1), (1, 1), (1, -1), (-1, -1),
+        # Knight moves (8)
+        (-2, 1), (-1, 2), (1, 2), (2, 1),
+        (2, -1), (1, -2), (-1, -2), (-2, -1),
     ]
 
     # Speed optimization settings
@@ -201,8 +212,8 @@ class RouteOptimizer(BaseOptimizer):
         self.weather_provider = weather_provider
 
         # Compute time-value penalty (lambda_time) for cost function.
-        # Every extra hour costs the same fuel as sailing 1 hour at service speed.
-        # This strongly penalises long detours that try to avoid weather.
+        # Scaled by TIME_PENALTY_WEIGHT so weather-avoidance detours that add
+        # modest extra time (5-15% longer) can still prove fuel-optimal.
         service_speed = (
             self.vessel_model.specs.service_speed_laden if is_laden
             else self.vessel_model.specs.service_speed_ballast
@@ -213,7 +224,7 @@ class RouteOptimizer(BaseOptimizer):
             weather=None,
             distance_nm=service_speed,  # 1 hour at service speed
         )
-        self._lambda_time = service_fuel_result['fuel_mt'] * 1.0
+        self._lambda_time = service_fuel_result['fuel_mt'] * self.TIME_PENALTY_WEIGHT
 
         # Build grid around origin-destination corridor and run A*
         grid = self._build_grid([origin, destination])

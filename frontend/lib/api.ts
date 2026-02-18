@@ -794,6 +794,33 @@ export interface FuelScenario {
   power_kw: number;
 }
 
+// Model curves types
+export interface ModelCurvesResponse {
+  speed_range_kts: number[];
+  resistance_theoretical_kn: number[];
+  resistance_calibrated_kn: number[];
+  power_kw: number[];
+  sfoc_gkwh: number[];
+  fuel_mt_per_day: number[];
+  sfoc_curve: {
+    load_pct: number[];
+    sfoc_theoretical_gkwh: number[];
+    sfoc_calibrated_gkwh: number[];
+  };
+  calibration: {
+    calibrated: boolean;
+    factors: {
+      calm_water: number;
+      wind: number;
+      waves: number;
+      sfoc_factor: number;
+    };
+    calibrated_at: string | null;
+    num_reports_used: number;
+    calibration_error_mt: number;
+  };
+}
+
 // Performance prediction types
 export interface PerformancePredictionRequest {
   is_laden: boolean;
@@ -1574,6 +1601,11 @@ export const apiClient = {
 
   async getFuelScenarios(): Promise<{ scenarios: FuelScenario[] }> {
     const response = await api.get<{ scenarios: FuelScenario[] }>('/api/vessel/fuel-scenarios');
+    return response.data;
+  },
+
+  async getModelCurves(): Promise<ModelCurvesResponse> {
+    const response = await api.get<ModelCurvesResponse>('/api/vessel/model-curves');
     return response.data;
   },
 
