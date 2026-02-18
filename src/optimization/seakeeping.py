@@ -125,30 +125,42 @@ class SafetyAssessment:
 @dataclass
 class SafetyLimits:
     """
-    Operational safety limits.
+    Operational safety limits for MR Product Tanker.
 
-    Based on IMO guidance and typical operational criteria.
+    Hard avoidance limits prevent the optimizer from routing through
+    conditions that exceed structural or operational envelopes.
+    Motion-based limits (roll, pitch, acceleration) provide graduated
+    penalties via seakeeping model assessment.
+
+    References:
+    - IMO MSC.1/Circ.1228 "Revised Guidance for Avoiding Dangerous Situations"
+    - ISO 2631-3:1985 "Evaluation of human exposure to whole-body vibration"
     """
-    # Roll limits (degrees)
-    max_roll_safe: float = 15.0  # Normal operations
-    max_roll_marginal: float = 25.0  # Reduced operations
+    # ── Hard avoidance limits (instant rejection, no motion calc needed) ──
+    # These are absolute no-go thresholds for an MR Product Tanker (~50k DWT).
+    max_wave_height_m: float = 6.0    # Hs ≥ 6 m → forbidden (BF 9+)
+    max_wind_speed_kts: float = 70.0  # ≥ 70 kts → forbidden (storm force 12)
+
+    # ── Roll limits (degrees) — motion-based graduated penalties ──
+    max_roll_safe: float = 15.0       # Normal operations
+    max_roll_marginal: float = 25.0   # Reduced operations
     max_roll_dangerous: float = 30.0  # Dangerous
 
-    # Pitch limits (degrees)
+    # ── Pitch limits (degrees) ──
     max_pitch_safe: float = 5.0
     max_pitch_marginal: float = 8.0
     max_pitch_dangerous: float = 12.0
 
-    # Vertical acceleration limits (m/s²) - at bridge
-    max_accel_safe: float = 0.2 * 9.81  # ~2 m/s² - comfortable
-    max_accel_marginal: float = 0.3 * 9.81  # ~3 m/s² - tolerable
-    max_accel_dangerous: float = 0.5 * 9.81  # ~5 m/s² - severe
+    # ── Vertical acceleration limits (m/s²) — at bridge ──
+    max_accel_safe: float = 0.2 * 9.81   # ~2 m/s² — comfortable
+    max_accel_marginal: float = 0.3 * 9.81  # ~3 m/s² — tolerable
+    max_accel_dangerous: float = 0.5 * 9.81  # ~5 m/s² — severe
 
-    # Slamming probability limits
-    max_slam_safe: float = 0.03  # 3% - occasional
-    max_slam_marginal: float = 0.10  # 10% - frequent
+    # ── Slamming probability limits ──
+    max_slam_safe: float = 0.03   # 3% — occasional
+    max_slam_marginal: float = 0.10  # 10% — frequent
 
-    # Parametric roll risk
+    # ── Parametric roll risk ──
     max_param_roll_risk: float = 0.3
 
 
@@ -905,12 +917,24 @@ class SafetyConstraints:
         heading_deg: float,
         speed_kts: float,
         is_laden: bool,
+        wind_speed_kts: float = 0.0,
     ) -> float:
         """
         Get cost factor for route optimization.
 
         Returns a multiplier (1.0 = safe, >1.0 = penalized, inf = forbidden).
+
+        Hard avoidance limits are checked first (wave height, wind speed)
+        before computing motion-based penalties. This prevents the optimizer
+        from routing through extreme conditions regardless of vessel heading.
         """
+        # ── Hard avoidance: instant rejection ──
+        if wave_height_m >= self.limits.max_wave_height_m:
+            return float('inf')
+        if wind_speed_kts >= self.limits.max_wind_speed_kts:
+            return float('inf')
+
+        # ── Motion-based graduated penalties ──
         assessment = self.assess_safety(
             wave_height_m, wave_period_s, wave_dir_deg,
             heading_deg, speed_kts, is_laden

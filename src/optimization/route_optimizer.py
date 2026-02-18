@@ -681,6 +681,7 @@ class RouteOptimizer(BaseOptimizer):
                 heading_deg=bearing,
                 speed_kts=calm_speed_kts,
                 is_laden=is_laden,
+                wind_speed_kts=weather.wind_speed_ms * 1.9438,
             )
             if safety_factor == float('inf'):
                 return float('inf'), float('inf')  # Dangerous - forbidden
@@ -814,6 +815,7 @@ class RouteOptimizer(BaseOptimizer):
                     heading_deg=bearing_deg,
                     speed_kts=speed_kts,
                     is_laden=is_laden,
+                    wind_speed_kts=weather.wind_speed_ms * 1.9438,
                 )
                 if safety_factor == float('inf'):
                     continue  # Skip dangerous speeds

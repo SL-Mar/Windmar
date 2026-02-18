@@ -613,6 +613,7 @@ class VisirOptimizer(BaseOptimizer):
                     heading_deg=bearing_deg,
                     speed_kts=speed_kts,
                     is_laden=is_laden,
+                    wind_speed_kts=weather.wind_speed_ms * 1.9438,
                 )
                 if sf == float("inf"):
                     continue  # unsafe at this speed — hard constraint always
@@ -635,7 +636,9 @@ class VisirOptimizer(BaseOptimizer):
             fuel = result["fuel_mt"]
 
             if self.optimization_target == "fuel":
-                score = (fuel + lambda_time * hours) * zone_factor * safety_cost * ice_cost_factor
+                # Safety/zone penalties apply to fuel only; time penalty stays clean
+                # to avoid inflating detour costs and producing worse-than-direct routes.
+                score = fuel * zone_factor * safety_cost * ice_cost_factor + lambda_time * hours
             else:
                 score = hours * zone_factor * safety_cost * ice_cost_factor
 
