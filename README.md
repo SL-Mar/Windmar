@@ -4,6 +4,8 @@
 
 A maritime route optimization platform for Medium Range (MR) Product Tankers. Minimizes fuel consumption through weather-aware A\* routing, physics-based vessel modeling, and real-time sensor fusion.
 
+**Documentation**: [slmar.co/windmar/docs.html](https://slmar.co/windmar/docs.html)
+
 ## Features
 
 ### Vessel Performance Modeling
@@ -24,15 +26,17 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 
 ### Route Optimization
 - **Dual-engine optimization**: A\* grid search + VISIR-style Dijkstra with time-expanded graph
+- Both engines converge on ocean-crossing routes (tested: 901nm Portugal-Casquets, A\* -2.6% fuel, VISIR -0.7% fuel)
 - All 6 route variants computed per request (2 engines x 3 safety weights: fuel / balanced / safety)
 - Sequential execution with progressive UI updates as each route completes
 - A\* grid at 0.2 deg (~12nm) resolution; VISIR at 0.25 deg (~15nm) — aligned with professional routing software (VISIR-2, StormGeo)
+- **Hard avoidance limits** — Hs >= 6m and wind >= 70 kts are instant rejection (no motion calculation)
+- **Seakeeping safety constraints** — graduated roll, pitch, acceleration limits with motion-based cost multipliers
 - Distance-adaptive land mask sampling (~1 check per 2nm, auto-scaled per segment length)
 - Per-edge land crossing checks on both engines using `global-land-mask` (1km resolution)
 - Voluntary speed reduction (VSR) in heavy weather (VISIR engine)
 - Variable speed optimization (10-18 knots per leg)
 - Turn-angle path smoothing to eliminate grid staircase artifacts
-- Seakeeping safety constraints (roll, pitch, acceleration limits)
 - RTZ file import/export (IEC 61174 ECDIS standard)
 
 ### Weather Integration
@@ -396,9 +400,30 @@ The system ships with a default MR Product Tanker configuration (all values conf
 
 ## Changelog
 
-### v0.0.8 — Vessel Model Upgrade, Engine Log Analytics, Weather Pipeline
+### v0.0.8 — Vessel Model Upgrade, Engine Log Analytics, Optimizer Convergence
 
-Engine log ingestion and analytics, physics model upgrade (SFOC fix, Kwon's wave resistance, performance predictor), and weather pipeline refactoring.
+Engine log ingestion and analytics, physics model upgrade (SFOC fix, Kwon's wave resistance, performance predictor), weather pipeline refactoring, and dual-engine optimizer convergence with corrected cost formulas and MR safety limits.
+
+**Optimizer Fixes**
+
+- **VISIR cost formula corrected** — safety and zone multipliers now apply to fuel cost only, not the time penalty; previous formula `(fuel + lambda*hours) * safety * zone` inflated detour costs; fixed to `fuel * safety * zone + lambda*hours`
+- **Hard avoidance limits** — Hs >= 6m and wind >= 70 kts trigger instant rejection (`inf` cost) before computing vessel motions, matching MR Product Tanker operational limits (Beaufort 9+)
+- **Wind speed plumbed to safety checks** — `get_safety_cost_factor()` now receives wind speed in both A\* and VISIR engines
+- **VISIR converges on 901nm route** (Portugal to Casquets): 377 cells, 1.5s compute, -0.7% fuel savings
+- **A\* converges on 901nm route**: -2.6% fuel savings
+
+**Model Curves & Calibration**
+
+- **Model curves endpoint** — `GET /api/vessel/model-curves` returns speed-indexed arrays for resistance, power, SFOC, and fuel consumption
+- **Auto-load calibration** — saved calibration factors restored on startup (survives container restarts)
+- **AnalysisPanel** — calibration indicator and smart optimization route display
+
+**Layout Harmonization**
+
+- Standardized container layout (`container mx-auto px-6 pt-20 pb-12`) across all dashboard pages
+- Vessel Model tab: 2x2 chart grid (was stacked), all charts at consistent height
+- Engine Log: wider tab bar and upload section, consistent chart heights
+- Analysis, CII, Live dashboard: consistent padding and offsets
 
 **Vessel Model Physics**
 
@@ -481,6 +506,10 @@ Live connectivity to Copernicus and NOAA weather services.
 
 - `main` - Stable release branch
 - `demo` - Demo deployment branch (isolated)
+
+## Documentation
+
+Full technical documentation, safety criteria, algorithm details, and changelog available at [slmar.co/windmar/docs.html](https://slmar.co/windmar/docs.html).
 
 ## License
 
