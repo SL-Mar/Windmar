@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 import uuid
 
+from .tss_zones import TSS_METADATA, TSS_ZONES
+
 logger = logging.getLogger(__name__)
 
 
@@ -277,55 +279,21 @@ class ZoneChecker:
             is_builtin=True,
         ))
 
-        # Gulf of Aden TSS
-        self.add_zone(Zone(
-            id="tss_gulf_of_aden",
-            properties=ZoneProperties(
-                name="Gulf of Aden IRTC",
-                zone_type=ZoneType.TSS,
-                interaction=ZoneInteraction.MANDATORY,
-                authority="MSCHOA",
-                notes="Internationally Recommended Transit Corridor",
-            ),
-            coordinates=[
-                (14.0, 45.0), (14.0, 53.0), (12.5, 53.0), (11.8, 50.0),
-                (11.5, 45.0), (14.0, 45.0)
-            ],
-            is_builtin=True,
-        ))
-
-        # Dover Strait TSS
-        self.add_zone(Zone(
-            id="tss_dover",
-            properties=ZoneProperties(
-                name="Dover Strait TSS",
-                zone_type=ZoneType.TSS,
-                interaction=ZoneInteraction.MANDATORY,
-                authority="IMO",
-                notes="Mandatory traffic separation scheme",
-            ),
-            coordinates=[
-                (51.2, 1.0), (51.2, 2.0), (50.8, 2.0), (50.8, 1.0),
-                (51.2, 1.0)
-            ],
-            is_builtin=True,
-        ))
-
-        # Strait of Gibraltar TSS
-        self.add_zone(Zone(
-            id="tss_gibraltar",
-            properties=ZoneProperties(
-                name="Strait of Gibraltar TSS",
-                zone_type=ZoneType.TSS,
-                interaction=ZoneInteraction.MANDATORY,
-                authority="IMO",
-            ),
-            coordinates=[
-                (36.2, -5.8), (36.2, -5.2), (35.8, -5.2), (35.8, -5.8),
-                (36.2, -5.8)
-            ],
-            is_builtin=True,
-        ))
+        # Load all TSS zones from tss_zones.py (20 zones worldwide)
+        for key, coords in TSS_ZONES.items():
+            meta = TSS_METADATA.get(key, {})
+            self.add_zone(Zone(
+                id=f"tss_{key}",
+                properties=ZoneProperties(
+                    name=meta.get("name", key.replace("_", " ").title()),
+                    zone_type=ZoneType.TSS,
+                    interaction=ZoneInteraction.MANDATORY,
+                    authority=meta.get("authority", "IMO"),
+                    notes=meta.get("notes"),
+                ),
+                coordinates=coords,
+                is_builtin=True,
+            ))
 
         # Suez Canal
         self.add_zone(Zone(
