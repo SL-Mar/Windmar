@@ -15,6 +15,8 @@ from scipy.optimize import minimize
 
 from ..optimization.vessel_model import VesselModel, VesselSpecs
 
+_VS = VesselSpecs  # shorthand for default parameter references
+
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +321,7 @@ class ModelCalibrator:
         speed_kts: float,
         is_laden: bool,
         weather: Optional[Dict] = None,
-        distance_nm: float = 24.0 * 14.5,  # One day at service speed
+        distance_nm: float = 24.0 * _VS.service_speed_laden,  # One day at service speed
     ) -> Dict:
         """
         Predict fuel consumption using calibrated model.

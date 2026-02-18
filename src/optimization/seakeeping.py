@@ -25,6 +25,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from src.optimization.vessel_model import VesselSpecs as _VS
+
 logger = logging.getLogger(__name__)
 
 
@@ -178,8 +180,8 @@ class SeakeepingModel:
     def __init__(
         self,
         specs: Optional[SeakeepingSpecs] = None,
-        lpp: float = 176.0,
-        beam: float = 32.0,
+        lpp: float = _VS.lpp,
+        beam: float = _VS.beam,
     ):
         """
         Initialize seakeeping model.
@@ -967,8 +969,8 @@ class SafetyConstraints:
 
 
 def create_default_safety_constraints(
-    lpp: float = 176.0,
-    beam: float = 32.0,
+    lpp: float = _VS.lpp,
+    beam: float = _VS.beam,
 ) -> SafetyConstraints:
     """
     Create safety constraints with default MR tanker parameters.

@@ -579,16 +579,20 @@ class VelocityDataResponse(BaseModel):
 
 
 class VesselConfig(BaseModel):
-    """Vessel configuration."""
-    dwt: float = 49000.0
-    loa: float = 183.0
-    beam: float = 32.0
-    draft_laden: float = 11.8
-    draft_ballast: float = 6.5
-    mcr_kw: float = 6600.0
-    sfoc_at_mcr: float = 171.0
-    service_speed_laden: float = 13.0
-    service_speed_ballast: float = 13.0
+    """Vessel configuration.
+
+    Defaults sourced from VesselSpecs (canonical MR tanker definition).
+    At runtime, values are overridden by DB-persisted specs on startup.
+    """
+    dwt: float = VesselSpecs.dwt
+    loa: float = VesselSpecs.loa
+    beam: float = VesselSpecs.beam
+    draft_laden: float = VesselSpecs.draft_laden
+    draft_ballast: float = VesselSpecs.draft_ballast
+    mcr_kw: float = VesselSpecs.mcr_kw
+    sfoc_at_mcr: float = VesselSpecs.sfoc_at_mcr
+    service_speed_laden: float = VesselSpecs.service_speed_laden
+    service_speed_ballast: float = VesselSpecs.service_speed_ballast
 
 
 class NoonReportModel(BaseModel):
@@ -6411,19 +6415,22 @@ from src.database.engine_log_parser import EngineLogParser
 
 def _save_vessel_specs_to_db(specs_dict: dict) -> None:
     """Persist vessel specs to the vessel_specs table (upsert by name='default')."""
+    _d = VesselSpecs  # canonical defaults
     with get_db_context() as db:
         row = db.query(VesselSpec).filter(VesselSpec.name == "default").first()
+        dwt = specs_dict.get("dwt", _d.dwt)
+        speed = specs_dict.get("service_speed_laden", _d.service_speed_laden)
         vals = {
             "name": "default",
-            "length": specs_dict.get("loa", 183.0),
-            "beam": specs_dict.get("beam", 32.0),
-            "draft": specs_dict.get("draft_laden", 11.8),
-            "deadweight": specs_dict.get("dwt", 49000.0),
-            "displacement": specs_dict.get("dwt", 49000.0) * 1.33,
-            "block_coefficient": 0.82,
-            "engine_power": specs_dict.get("mcr_kw", 6600.0),
-            "service_speed": specs_dict.get("service_speed_laden", 13.0),
-            "max_speed": specs_dict.get("service_speed_laden", 13.0) + 2.0,
+            "length": specs_dict.get("loa", _d.loa),
+            "beam": specs_dict.get("beam", _d.beam),
+            "draft": specs_dict.get("draft_laden", _d.draft_laden),
+            "deadweight": dwt,
+            "displacement": dwt * 1.33,
+            "block_coefficient": _d.cb_laden,
+            "engine_power": specs_dict.get("mcr_kw", _d.mcr_kw),
+            "service_speed": speed,
+            "max_speed": speed + 2.0,
         }
         extra = {
             "draft_ballast": specs_dict.get("draft_ballast"),
