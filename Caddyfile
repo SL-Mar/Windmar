@@ -1,0 +1,15 @@
+demo-windmar.slmar.co {
+	basic_auth * {
+		demo {env.BASIC_AUTH_HASH}
+	}
+
+	encode gzip
+
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

@@ -61,6 +61,7 @@ services:
       # Application
       LOG_LEVEL: ${LOG_LEVEL:-info}
       ENVIRONMENT: ${ENVIRONMENT:-development}
+      DEMO_MODE: ${DEMO_MODE:-false}
       # Copernicus Weather Data
       COPERNICUS_MOCK_MODE: ${COPERNICUS_MOCK_MODE:-true}
       CDSAPI_URL: ${CDSAPI_URL:-https://cds.climate.copernicus.eu/api}
@@ -95,6 +96,7 @@ services:
       dockerfile: Dockerfile
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        NEXT_PUBLIC_DEMO_MODE: ${NEXT_PUBLIC_DEMO_MODE:-false}
     container_name: windmar-frontend
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
