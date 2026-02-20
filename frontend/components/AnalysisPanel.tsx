@@ -347,7 +347,7 @@ export default function AnalysisPanel({
                     return (
                       <div key={engine} className="space-y-1">
                         <div className="text-[10px] text-gray-500 uppercase tracking-wider">
-                          {engine === 'astar' ? 'A*' : 'VISIR'}
+                          {engine === 'astar' ? 'A*' : 'Dijkstra'}
                         </div>
                         {visibleKeys.map(key => {
                           const r = allResults[key]!;

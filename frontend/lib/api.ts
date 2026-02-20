@@ -522,9 +522,9 @@ export const ROUTE_STYLES: Record<OptimizedRouteKey, { color: string; dashArray:
   astar_fuel:     { color: '#22c55e', dashArray: '8, 4',  label: 'A* Fuel' },
   astar_balanced: { color: '#4ade80', dashArray: '12, 6', label: 'A* Balanced' },
   astar_safety:   { color: '#86efac', dashArray: '4, 4',  label: 'A* Safety' },
-  visir_fuel:     { color: '#f97316', dashArray: '8, 4',  label: 'VISIR Fuel' },
-  visir_balanced: { color: '#fb923c', dashArray: '12, 6', label: 'VISIR Balanced' },
-  visir_safety:   { color: '#fdba74', dashArray: '4, 4',  label: 'VISIR Safety' },
+  visir_fuel:     { color: '#f97316', dashArray: '8, 4',  label: 'Dijkstra Fuel' },
+  visir_balanced: { color: '#fb923c', dashArray: '12, 6', label: 'Dijkstra Balanced' },
+  visir_safety:   { color: '#fdba74', dashArray: '4, 4',  label: 'Dijkstra Safety' },
 };
 
 export const DEFAULT_ROUTE_VISIBILITY: RouteVisibility = {

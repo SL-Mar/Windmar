@@ -25,7 +25,7 @@ A weather routing and performance analytics platform for merchant ships. Optimiz
 - **Batch management** — upload, browse, filter, and delete engine log batches
 
 ### Route Optimization
-- **Dual-engine optimization**: A\* grid search + Dijkstra with time-expanded graph (inspired by the VISIR model, independently implemented — VISIR itself is GPL-licensed)
+- **Dual-engine optimization**: A\* grid search + Dijkstra with time-expanded graph
 - Both engines converge on ocean-crossing routes (tested: 901nm Portugal-Casquets, A\* -2.6% fuel, Dijkstra -0.7% fuel)
 - All 6 route variants computed per request (2 engines x 3 safety weights: fuel / balanced / safety)
 - Sequential execution with progressive UI updates as each route completes
@@ -156,7 +156,7 @@ windmar/
 │   │   ├── vessel_model.py        # Holtrop-Mennen + Kwon resistance, SFOC, performance predictor
 │   │   ├── base_optimizer.py      # Abstract base class for route optimizers
 │   │   ├── route_optimizer.py     # A* grid search with weather costs (0.2 deg)
-│   │   ├── visir_optimizer.py     # Dijkstra time-expanded graph, adapted from VISIR approach (0.25 deg)
+│   │   ├── visir_optimizer.py     # Dijkstra time-expanded graph optimizer (0.25 deg)
 │   │   ├── router.py              # Engine dispatcher (A*/Dijkstra selection)
 │   │   ├── voyage.py              # Per-leg voyage calculator (LegWeather, VoyageResult)
 │   │   ├── monte_carlo.py         # Temporal MC simulation with Cholesky correlation
