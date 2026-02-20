@@ -4,7 +4,7 @@
 
 A maritime route optimization platform for Medium Range (MR) Product Tankers. Minimizes fuel consumption through weather-aware A\* routing, physics-based vessel modeling, and real-time sensor fusion.
 
-**Documentation**: [slmar.co/windmar/docs.html](https://slmar.co/windmar/docs.html)
+**Documentation**: [windmar-nav.github.io](https://windmar-nav.github.io)
 
 ## Features
 
@@ -92,70 +92,94 @@ A maritime route optimization platform for Medium Range (MR) Product Tankers. Mi
 
 ## Architecture
 
+**[Interactive architecture diagram](https://excalidraw.com/#json=n0xP0fgNrzq-lvWIhBn5M,tqU3CTYYf7f01IANArq2yw)** (Excalidraw) | [Source file](assets/architecture.excalidraw)
+
 ```
 windmar/
-├── api/                        # FastAPI backend
-│   ├── main.py                 # API endpoints (~6500 lines), weather pipeline, vessel model
-│   ├── auth.py                 # API key authentication (bcrypt)
-│   ├── config.py               # API configuration (pydantic-settings)
-│   ├── middleware.py            # Security headers, structured logging, metrics
-│   ├── rate_limit.py           # Token bucket rate limiter (Redis-backed)
-│   ├── database.py             # SQLAlchemy ORM setup
-│   ├── models.py               # Database models (weather, engine log, vessel specs)
-│   ├── health.py               # Health check logic
-│   ├── state.py                # Thread-safe application state (singleton)
-│   ├── cache.py                # Weather data caching (Redis shared cache)
-│   ├── resilience.py           # Circuit breakers
-│   ├── cli.py                  # CLI utilities
-│   └── live.py                 # Live sensor data API router
+├── api/                           # FastAPI backend
+│   ├── main.py                    # Application factory + startup (281 lines)
+│   ├── routers/                   # Domain routers (9 modules)
+│   │   ├── weather.py             # 31 weather endpoints, forecast layers, cache mgmt
+│   │   ├── vessel.py              # Vessel specs, calibration, noon reports, prediction
+│   │   ├── voyage.py              # Voyage calculation, Monte Carlo, weather-along-route
+│   │   ├── optimization.py        # A* / VISIR route optimization, optimizer status
+│   │   ├── engine_log.py          # Engine log upload, entries, summary, calibration
+│   │   ├── zones.py               # Regulatory zone CRUD and spatial queries
+│   │   ├── cii.py                 # CII compliance calculations and projections
+│   │   ├── routes.py              # RTZ parsing, waypoint route creation
+│   │   └── system.py              # Health, metrics, status, data sources
+│   ├── schemas/                   # Pydantic request/response models (37 schemas)
+│   │   ├── common.py              # Position, shared base models
+│   │   ├── weather.py             # Weather grid, forecast frame schemas
+│   │   ├── vessel.py              # VesselConfig, CalibrationFactors, NoonReport
+│   │   ├── voyage.py              # VoyageRequest/Response, MonteCarloRequest
+│   │   ├── optimization.py        # OptimizationRequest/Response, SafetySummary
+│   │   ├── engine_log.py          # EngineLogUpload/Entry/Summary responses
+│   │   ├── zones.py               # CreateZoneRequest, ZoneResponse
+│   │   └── cii.py                 # CII calculation/projection schemas
+│   ├── state.py                   # Thread-safe application state (singleton)
+│   ├── weather_service.py         # Weather field accessors (wind, wave, current, SST, ice)
+│   ├── forecast_layer_manager.py  # Forecast dedup, progress tracking, frame serving
+│   ├── auth.py                    # API key authentication (bcrypt)
+│   ├── config.py                  # API configuration (pydantic-settings)
+│   ├── middleware.py              # Security headers, structured logging, metrics
+│   ├── rate_limit.py              # Token bucket rate limiter (Redis-backed)
+│   ├── database.py                # SQLAlchemy ORM setup
+│   ├── models.py                  # Database models (weather, engine log, vessel specs)
+│   ├── health.py                  # Health check logic
+│   ├── cache.py                   # Weather data caching (Redis shared cache)
+│   ├── resilience.py              # Circuit breakers
+│   ├── demo.py                    # Demo mode guards
+│   ├── cli.py                     # CLI utilities
+│   └── live.py                    # Live sensor data API router
 ├── src/
 │   ├── optimization/
-│   │   ├── vessel_model.py     # Holtrop-Mennen + Kwon resistance, SFOC, performance predictor
-│   │   ├── base_optimizer.py   # Abstract base class for route optimizers
-│   │   ├── route_optimizer.py  # A* grid search with weather costs (0.2 deg)
-│   │   ├── visir_optimizer.py  # VISIR-style Dijkstra time-expanded graph (0.25 deg)
-│   │   ├── router.py           # Engine dispatcher (A*/VISIR selection)
-│   │   ├── voyage.py           # Per-leg voyage calculator (LegWeather, VoyageResult)
-│   │   ├── monte_carlo.py      # Temporal MC simulation with Cholesky correlation
-│   │   ├── grid_weather_provider.py  # Bilinear interpolation from pre-fetched grids
-│   │   ├── temporal_weather_provider.py  # Trilinear interpolation (lat, lon, time)
+│   │   ├── vessel_model.py        # Holtrop-Mennen + Kwon resistance, SFOC, performance predictor
+│   │   ├── base_optimizer.py      # Abstract base class for route optimizers
+│   │   ├── route_optimizer.py     # A* grid search with weather costs (0.2 deg)
+│   │   ├── visir_optimizer.py     # VISIR-style Dijkstra time-expanded graph (0.25 deg)
+│   │   ├── router.py              # Engine dispatcher (A*/VISIR selection)
+│   │   ├── voyage.py              # Per-leg voyage calculator (LegWeather, VoyageResult)
+│   │   ├── monte_carlo.py         # Temporal MC simulation with Cholesky correlation
+│   │   ├── grid_weather_provider.py     # Bilinear interpolation from pre-fetched grids
+│   │   ├── temporal_weather_provider.py # Trilinear interpolation (lat, lon, time)
 │   │   ├── weather_assessment.py  # Route weather assessment + DB provisioning
 │   │   ├── vessel_calibration.py  # Noon report + engine log calibration (scipy)
-│   │   └── seakeeping.py       # Ship motion safety assessment
+│   │   └── seakeeping.py          # Ship motion safety assessment
 │   ├── data/
-│   │   ├── copernicus.py       # GFS, ERA5, CMEMS providers + forecast prefetch
-│   │   ├── db_weather_provider.py  # DB-backed weather (compressed grids from PostgreSQL)
-│   │   ├── weather_ingestion.py    # Scheduled weather grid ingestion service
-│   │   ├── regulatory_zones.py # Zone management and point-in-polygon
-│   │   ├── eca_zones.py        # ECA zone definitions
-│   │   └── land_mask.py        # Ocean/land detection
+│   │   ├── copernicus.py          # GFS, ERA5, CMEMS providers + forecast prefetch
+│   │   ├── db_weather_provider.py # DB-backed weather (compressed grids from PostgreSQL)
+│   │   ├── weather_ingestion.py   # Scheduled weather grid ingestion service
+│   │   ├── regulatory_zones.py    # Zone management and point-in-polygon
+│   │   ├── eca_zones.py           # ECA zone definitions
+│   │   └── land_mask.py           # Ocean/land detection
 │   ├── sensors/
-│   │   ├── sbg_nmea.py         # SBG IMU NMEA parsing
-│   │   ├── sbg_ellipse.py      # SBG Ellipse sensor driver
-│   │   └── wave_estimator.py   # FFT wave spectrum from heave data
+│   │   ├── sbg_nmea.py            # SBG IMU NMEA parsing
+│   │   ├── sbg_ellipse.py         # SBG Ellipse sensor driver
+│   │   └── wave_estimator.py      # FFT wave spectrum from heave data
 │   ├── fusion/
-│   │   └── fusion_engine.py    # Multi-source data fusion
+│   │   └── fusion_engine.py       # Multi-source data fusion
 │   ├── compliance/
-│   │   └── cii.py              # IMO CII rating calculations
+│   │   └── cii.py                 # IMO CII rating calculations
 │   ├── routes/
-│   │   └── rtz_parser.py       # RTZ XML route file parser
-│   ├── validation.py           # Input validation
-│   ├── config.py               # Application configuration
-│   └── metrics.py              # Performance metrics collection
-├── frontend/                   # Next.js 15 + TypeScript
-│   ├── app/                    # Pages (route planner, vessel config, CII, live dashboard)
-│   ├── components/             # React components (maps, charts, weather layers, forecast timeline)
-│   └── lib/                    # API client, utilities
+│   │   └── rtz_parser.py          # RTZ XML route file parser
+│   ├── validation.py              # Input validation
+│   ├── config.py                  # Application configuration
+│   └── metrics.py                 # Performance metrics collection
+├── frontend/                      # Next.js 15 + TypeScript
+│   ├── app/                       # Pages (route planner, vessel config, CII, live dashboard)
+│   ├── components/                # React components (maps, charts, weather layers, forecast timeline)
+│   └── lib/                       # API client, utilities
 ├── tests/
-│   ├── unit/                   # Vessel model, router, validation, ECA zones, Excel parser, CII, calibration, SBG NMEA, metrics
-│   ├── integration/            # API endpoints, optimization flow
-│   └── test_e2e_*.py           # End-to-end sensor integration
-├── examples/                   # Demo scripts (simple, ARA-MED, calibration)
-├── docker/                     # init-db.sql, migrations/ (weather tables)
-├── data/                       # Runtime data (GRIB cache, calibration, climatology)
-├── docker-compose.yml          # Full stack (API + frontend + PostgreSQL + Redis)
-├── Dockerfile                  # Multi-stage production build
-└── pyproject.toml              # Poetry project definition
+│   ├── unit/                      # Vessel model, router, validation, ECA zones, Excel parser, CII, calibration, SBG NMEA, metrics
+│   ├── integration/               # API endpoints, optimization flow
+│   └── test_e2e_*.py              # End-to-end sensor integration
+├── examples/                      # Demo scripts (simple, ARA-MED, calibration)
+├── docker/                        # init-db.sql, migrations/ (weather tables)
+├── data/                          # Runtime data (GRIB cache, calibration, climatology)
+├── docker-compose.yml             # Full stack (API + frontend + PostgreSQL + Redis)
+├── Dockerfile                     # Multi-stage production build
+└── pyproject.toml                 # Poetry project definition
 ```
 
 ## Tech Stack
@@ -400,6 +424,20 @@ The system ships with a default MR Product Tanker configuration (all values conf
 
 ## Changelog
 
+### v0.0.9 — Router-Based Architecture Refactoring
+
+Complete structural refactoring of the API layer. Zero endpoint changes, zero test regressions.
+
+**Monolith → Modular**
+
+- **main.py reduced from 6,922 to 281 lines** — now an application factory with startup/shutdown lifecycle only
+- **9 domain routers** extracted into `api/routers/`: weather, vessel, voyage, optimization, engine_log, zones, cii, routes, system
+- **37 Pydantic schemas** extracted into `api/schemas/` (9 schema modules) — request/response models no longer embedded in endpoint code
+- **Thread-safe VesselState** — vessel model, specs, and calibration state managed by a singleton with `threading.Lock` guards
+- **WeatherService module** — weather field accessors (wind, wave, current, SST, ice, visibility) extracted from inline endpoint logic
+- **ForecastLayerManager** — deduplicates concurrent prefetch requests, tracks progress per layer, serves cached forecast frames
+- All existing endpoints, URL paths, and response schemas unchanged
+
 ### v0.0.8 — Vessel Model Upgrade, Engine Log Analytics, Optimizer Convergence
 
 Engine log ingestion and analytics, physics model upgrade (SFOC fix, Kwon's wave resistance, performance predictor), weather pipeline refactoring, and dual-engine optimizer convergence with corrected cost formulas and MR safety limits.
@@ -509,7 +547,7 @@ Live connectivity to Copernicus and NOAA weather services.
 
 ## Documentation
 
-Full technical documentation, safety criteria, algorithm details, and changelog available at [slmar.co/windmar/docs.html](https://slmar.co/windmar/docs.html).
+Full technical documentation, safety criteria, algorithm details, and changelog available at [windmar-nav.github.io](https://windmar-nav.github.io).
 
 ## License
 

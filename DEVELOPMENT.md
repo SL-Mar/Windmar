@@ -122,34 +122,47 @@ Test markers: `unit`, `integration`, `slow`.
 
 ```
 windmar/
-├── api/                    # FastAPI backend
-│   ├── main.py             # Endpoints (~6500 lines)
-│   ├── config.py           # Pydantic settings
-│   ├── models.py           # SQLAlchemy ORM models
-│   ├── auth.py             # API key authentication
-│   ├── cache.py            # Redis weather cache
-│   └── rate_limit.py       # slowapi rate limiting
-├── src/                    # Core domain logic
-│   ├── optimization/       # Route optimizers (A*, VISIR, vessel model)
-│   ├── data/               # Weather providers (GFS, CMEMS, Copernicus)
-│   ├── database/           # Calibration, engine log parser
-│   ├── sensors/            # SBG IMU drivers
-│   ├── fusion/             # Data fusion
-│   └── compliance/         # IMO CII calculator
-├── frontend/               # Next.js 15 + React 19
-│   ├── app/                # Pages (map, analysis, vessel, engine-log)
-│   ├── components/         # React components
-│   └── lib/                # API client, utilities
-├── tests/                  # pytest suite
-│   ├── unit/               # Unit tests
-│   └── integration/        # Integration tests
-├── docker/                 # DB init scripts, migrations
-├── examples/               # Demo scripts
-├── data/                   # Runtime data (gitignored)
-├── docker-compose.yml      # Full stack
-├── Dockerfile              # Backend multi-stage build
-├── requirements.txt        # Python dependencies
-└── pytest.ini              # Test configuration
+├── api/                        # FastAPI backend
+│   ├── main.py                 # App factory + startup (281 lines)
+│   ├── routers/                # Domain routers (9 modules)
+│   │   ├── weather.py          # Weather endpoints, forecast layers
+│   │   ├── vessel.py           # Vessel specs, calibration, prediction
+│   │   ├── voyage.py           # Voyage calc, Monte Carlo
+│   │   ├── optimization.py     # A*/VISIR route optimization
+│   │   ├── engine_log.py       # Engine log upload and analytics
+│   │   ├── zones.py            # Regulatory zone CRUD
+│   │   ├── cii.py              # CII compliance
+│   │   ├── routes.py           # RTZ parsing, waypoint routes
+│   │   └── system.py           # Health, metrics, status
+│   ├── schemas/                # Pydantic models (37 schemas)
+│   ├── state.py                # Thread-safe app state (singleton)
+│   ├── weather_service.py      # Weather field accessors
+│   ├── forecast_layer_manager.py  # Forecast dedup + progress
+│   ├── config.py               # Pydantic settings
+│   ├── models.py               # SQLAlchemy ORM models
+│   ├── auth.py                 # API key authentication
+│   ├── cache.py                # Redis weather cache
+│   └── rate_limit.py           # slowapi rate limiting
+├── src/                        # Core domain logic
+│   ├── optimization/           # Route optimizers (A*, VISIR, vessel model)
+│   ├── data/                   # Weather providers (GFS, CMEMS, Copernicus)
+│   ├── sensors/                # SBG IMU drivers
+│   ├── fusion/                 # Data fusion
+│   └── compliance/             # IMO CII calculator
+├── frontend/                   # Next.js 15 + React 19
+│   ├── app/                    # Pages (map, analysis, vessel, engine-log)
+│   ├── components/             # React components
+│   └── lib/                    # API client, utilities
+├── tests/                      # pytest suite
+│   ├── unit/                   # Unit tests
+│   └── integration/            # Integration tests
+├── docker/                     # DB init scripts, migrations
+├── examples/                   # Demo scripts
+├── data/                       # Runtime data (gitignored)
+├── docker-compose.yml          # Full stack
+├── Dockerfile                  # Backend multi-stage build
+├── requirements.txt            # Python dependencies
+└── pytest.ini                  # Test configuration
 ```
 
 ## Common Commands
@@ -212,6 +225,7 @@ mypy src/ api/
 
 ## Architecture Notes
 
+- **Router-based API** — `main.py` is an application factory (281 lines). All endpoint code lives in `api/routers/` (9 domain routers). Shared state is accessed via `api/state.py` singletons, weather logic via `api/weather_service.py`, and request/response schemas via `api/schemas/`.
 - **Source code is baked into the Docker image** (not bind-mounted). Run `docker compose up -d --build api` after backend changes.
 - **Frontend is also baked**. Run `docker compose up -d --build frontend` after frontend changes.
 - **Data directory** (`./data`) IS bind-mounted — weather caches, calibration files, and vessel DB persist across rebuilds.
