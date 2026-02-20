@@ -46,6 +46,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
 
     steps:
@@ -62,10 +65,14 @@ jobs:
 
       - name: Deploy on VPS
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
         with:
           host: ${{ secrets.DEMO_VPS_HOST }}
           username: ${{ secrets.DEMO_VPS_USER }}
           key: ${{ secrets.DEMO_VPS_SSH_KEY }}
+          envs: GH_TOKEN,GH_ACTOR
           script: |
             cd /opt/windmar-demo
             cat > .env << 'ENVEOF'
@@ -73,8 +80,11 @@ jobs:
             BASIC_AUTH_HASH=${{ secrets.DEMO_BASIC_AUTH_HASH }}
             ENVEOF
 
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-api:demo
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-frontend:demo
+            # Authenticate to GHCR on VPS for pulling private packages
+            echo "${GH_TOKEN}" | docker login ghcr.io -u "${GH_ACTOR}" --password-stdin
+
+            docker pull ghcr.io/windmar-nav/windmar-api:demo
+            docker pull ghcr.io/windmar-nav/windmar-frontend:demo
 
             # Ensure data dir and snapshot placeholder exist (prevents Docker dir-mount)
             mkdir -p data
