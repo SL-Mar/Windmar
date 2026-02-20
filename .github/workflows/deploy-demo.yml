@@ -77,7 +77,7 @@ jobs:
             cd /opt/windmar-demo
             cat > .env << 'ENVEOF'
             API_SECRET_KEY=${{ secrets.DEMO_API_SECRET }}
-            BASIC_AUTH_HASH=${{ secrets.DEMO_BASIC_AUTH_HASH }}
+            DEMO_API_KEY_HASH=${{ secrets.DEMO_API_KEY_HASH }}
             ENVEOF
 
             # Authenticate to GHCR on VPS for pulling private packages
