@@ -620,13 +620,15 @@ async def get_vessel_model_curves():
         result = model.calculate_fuel_consumption(
             speed_kts=spd, is_laden=True, distance_nm=spd * 24,
         )
-        power_kw_list.append(round(result["power_kw"], 0))
+        power_kw = result["power_kw"]
+        power_kw_list.append(round(power_kw, 0))
 
-        load = min(result["power_kw"] / specs.mcr_kw, 1.0)
+        load = min(power_kw / specs.mcr_kw, 1.0)
         sfoc = model._sfoc_curve(load)
         sfoc_gkwh_list.append(round(sfoc, 1))
 
         fuel_mt_per_day_list.append(round(result["fuel_mt"], 2))
+
 
     # SFOC vs engine load (15-100%)
     sfoc_loads = list(range(15, 105, 5))
@@ -642,13 +644,20 @@ async def get_vessel_model_curves():
         sfoc_at_loads_theoretical.append(round(theo, 1))
         sfoc_at_loads.append(round(theo * model.calibration_factors.get("sfoc_factor", 1.0), 1))
 
+    # Find the MCR cutoff index: first speed where power >= 99.5% MCR
+    mcr_cut = len(speeds)
+    for i, pw in enumerate(power_kw_list):
+        if pw >= specs.mcr_kw * 0.995:
+            mcr_cut = i + 1  # include this point, but not beyond
+            break
+
     return {
-        "speed_range_kts": [round(s, 1) for s in speeds],
-        "resistance_theoretical_kn": resistance_theoretical,
-        "resistance_calibrated_kn": resistance_calibrated,
-        "power_kw": power_kw_list,
-        "sfoc_gkwh": sfoc_gkwh_list,
-        "fuel_mt_per_day": fuel_mt_per_day_list,
+        "speed_range_kts": [round(s, 1) for s in speeds[:mcr_cut]],
+        "resistance_theoretical_kn": resistance_theoretical[:mcr_cut],
+        "resistance_calibrated_kn": resistance_calibrated[:mcr_cut],
+        "power_kw": power_kw_list[:mcr_cut],
+        "sfoc_gkwh": sfoc_gkwh_list[:mcr_cut],
+        "fuel_mt_per_day": fuel_mt_per_day_list[:mcr_cut],
         "sfoc_curve": {
             "load_pct": sfoc_loads,
             "sfoc_theoretical_gkwh": sfoc_at_loads_theoretical,
