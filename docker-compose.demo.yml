@@ -16,6 +16,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql
       - ./data/demo-snapshot.sql.gz:/docker-entrypoint-initdb.d/02-demo-data.sql.gz
+      - ./data/demo-engine-log-seed.sql:/docker-entrypoint-initdb.d/03-engine-log-seed.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U windmar"]
       interval: 15s

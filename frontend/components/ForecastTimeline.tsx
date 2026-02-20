@@ -49,6 +49,16 @@ function deriveHoursFromFrames(frames: Record<string, unknown>): number[] {
   return hours.length > 0 ? hours : [];
 }
 
+/** Extract hours that contain actual swell decomposition data (not just wave_hs). */
+function deriveSwellHoursFromFrames(frames: Record<string, WaveForecastFrame>): number[] {
+  const hours = Object.entries(frames)
+    .filter(([, frame]) => frame.swell != null)
+    .map(([key]) => Number(key))
+    .filter(n => !isNaN(n))
+    .sort((a, b) => a - b);
+  return hours.length > 0 ? hours : deriveHoursFromFrames(frames);
+}
+
 /** Find the forecast hour closest to "now" given a run time and available frame keys.
  *  Returns the nearest available hour that is <= now, or hour 0 as fallback. */
 function nearestHourToNow(runTimeStr: string, frames: Record<string, unknown>): number {
@@ -493,12 +503,15 @@ export default function ForecastTimeline({
       const frameKeys = Object.keys(data.frames);
       debugLog('info', 'SWELL', `Loaded ${frameKeys.length} frames in ${dt}s, grid=${data.ny}x${data.nx}`);
       setWaveFrameData(data);
-      setAvailableHours(deriveHoursFromFrames(data.frames));
+      const swellHours = deriveSwellHoursFromFrames(data.frames);
+      debugLog('info', 'SWELL', `Swell-specific hours: ${swellHours.length} (wave hours: ${Object.keys(data.frames).length})`);
+      setAvailableHours(swellHours);
       setPrefetchComplete(true);
       setIsLoading(false);
       if (onSwellForecastHourChange) {
         const rtStr = data.run_time ?? '';
-        const initHour = nearestHourToNow(rtStr, data.frames);
+        const swellFrameKeys = Object.fromEntries(swellHours.map(h => [String(h), true]));
+        const initHour = nearestHourToNow(rtStr, swellFrameKeys);
         debugLog('info', 'SWELL', `Setting initial swell frame T+${initHour}h`);
         setCurrentHour(initHour);
         onSwellForecastHourChange(initHour, data);
@@ -514,11 +527,13 @@ export default function ForecastTimeline({
 
     if (waveFrameDataRef.current) {
       const data = waveFrameDataRef.current;
-      setAvailableHours(deriveHoursFromFrames(data.frames));
+      const swellHours = deriveSwellHoursFromFrames(data.frames);
+      setAvailableHours(swellHours);
       setPrefetchComplete(true);
       setIsLoading(false);
       if (onSwellForecastHourChange) {
-        const initHour = nearestHourToNow(runTime ?? data.run_time ?? '', data.frames);
+        const swellFrameKeys = Object.fromEntries(swellHours.map(h => [String(h), true]));
+        const initHour = nearestHourToNow(runTime ?? data.run_time ?? '', swellFrameKeys);
         setCurrentHour(initHour);
         onSwellForecastHourChange(initHour, data);
       }

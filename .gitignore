@@ -40,7 +40,8 @@ env/
 htmlcov/
 
 # Data files / cache
-/data/
+/data/*
+!/data/demo-engine-log-seed.sql
 *.db
 *.sqlite
 *.xlsx

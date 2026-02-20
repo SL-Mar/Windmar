@@ -60,7 +60,7 @@ jobs:
           host: ${{ secrets.DEMO_VPS_HOST }}
           username: ${{ secrets.DEMO_VPS_USER }}
           key: ${{ secrets.DEMO_VPS_SSH_KEY }}
-          source: "docker-compose.demo.yml,Caddyfile,docker/init-db.sql"
+          source: "docker-compose.demo.yml,Caddyfile,docker/init-db.sql,data/demo-engine-log-seed.sql"
           target: /opt/windmar-demo
 
       - name: Deploy on VPS
@@ -96,8 +96,24 @@ jobs:
             docker compose -f docker-compose.demo.yml down
             docker compose -f docker-compose.demo.yml up -d --force-recreate
 
-            # Wait for services to be healthy
-            sleep 30
+            # Wait for DB to be healthy
+            echo "Waiting for database to be healthy..."
+            for i in $(seq 1 60); do
+              if docker exec windmar-db pg_isready -U windmar > /dev/null 2>&1; then
+                echo "Database is ready."
+                break
+              fi
+              sleep 5
+            done
+
+            # Apply engine log seed (idempotent — DELETEs then INSERTs)
+            if [ -f data/demo-engine-log-seed.sql ]; then
+              echo "Applying engine log seed data..."
+              docker exec -i windmar-db psql -U windmar -d windmar < data/demo-engine-log-seed.sql
+            fi
+
+            # Wait for all services
+            sleep 15
             docker compose -f docker-compose.demo.yml ps
 
             docker image prune -f
