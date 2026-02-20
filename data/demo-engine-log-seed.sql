@@ -9,6 +9,51 @@
 
 BEGIN;
 
+-- Ensure table exists (self-contained — no dependency on API startup)
+CREATE TABLE IF NOT EXISTS engine_log_entries (
+    id UUID PRIMARY KEY,
+    vessel_id UUID,
+    timestamp TIMESTAMP NOT NULL,
+    lapse_hours FLOAT,
+    place VARCHAR(255),
+    event VARCHAR(100),
+    rpm FLOAT,
+    engine_distance FLOAT,
+    speed_stw FLOAT,
+    me_power_kw FLOAT,
+    me_load_pct FLOAT,
+    me_fuel_index_pct FLOAT,
+    shaft_power FLOAT,
+    shaft_torque_knm FLOAT,
+    slip_pct FLOAT,
+    hfo_me_mt FLOAT,
+    hfo_ae_mt FLOAT,
+    hfo_boiler_mt FLOAT,
+    hfo_total_mt FLOAT,
+    mgo_me_mt FLOAT,
+    mgo_ae_mt FLOAT,
+    mgo_total_mt FLOAT,
+    methanol_me_mt FLOAT,
+    rob_vlsfo_mt FLOAT,
+    rob_mgo_mt FLOAT,
+    rob_methanol_mt FLOAT,
+    rh_me FLOAT,
+    rh_ae_total FLOAT,
+    tc_rpm FLOAT,
+    scav_air_press_bar FLOAT,
+    fuel_temp_c FLOAT,
+    sw_temp_c FLOAT,
+    upload_batch_id UUID NOT NULL,
+    source_sheet VARCHAR(100),
+    source_file VARCHAR(500),
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    extended_data JSONB
+);
+CREATE INDEX IF NOT EXISTS ix_engine_log_entries_timestamp ON engine_log_entries(timestamp);
+CREATE INDEX IF NOT EXISTS ix_engine_log_entries_event ON engine_log_entries(event);
+CREATE INDEX IF NOT EXISTS ix_engine_log_entries_upload_batch_id ON engine_log_entries(upload_batch_id);
+CREATE INDEX IF NOT EXISTS ix_engine_log_vessel_timestamp ON engine_log_entries(vessel_id, timestamp);
+
 -- Delete existing demo batch data (idempotent)
 DELETE FROM engine_log_entries WHERE upload_batch_id = '00000000-0000-0000-0000-demo00batch1';
 

@@ -96,25 +96,24 @@ jobs:
             docker compose -f docker-compose.demo.yml down
             docker compose -f docker-compose.demo.yml up -d --force-recreate
 
-            # Wait for API to create DB tables (SQLAlchemy create_all on startup)
-            echo "Waiting for engine_log_entries table to exist..."
-            for i in $(seq 1 60); do
-              if docker exec windmar-db psql -U windmar -d windmar -c "SELECT 1 FROM engine_log_entries LIMIT 0" > /dev/null 2>&1; then
-                echo "Table engine_log_entries exists."
+            # Wait for DB to accept connections
+            echo "Waiting for database..."
+            for i in $(seq 1 40); do
+              if docker exec windmar-db pg_isready -U windmar > /dev/null 2>&1; then
+                echo "Database is ready."
                 break
               fi
-              echo "  Table not ready yet, waiting... ($i/60)"
               sleep 5
             done
 
-            # Apply engine log seed (idempotent — DELETEs then INSERTs)
+            # Apply engine log seed (self-contained: CREATE TABLE IF NOT EXISTS + data)
             if [ -f data/demo-engine-log-seed.sql ]; then
               echo "Applying engine log seed data..."
               docker exec -i windmar-db psql -U windmar -d windmar < data/demo-engine-log-seed.sql
-              echo "Engine log seed applied."
+              echo "Seed exit code: $?"
             fi
 
-            sleep 5
+            sleep 10
             docker compose -f docker-compose.demo.yml ps
 
             docker image prune -f
