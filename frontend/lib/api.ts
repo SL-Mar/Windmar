@@ -3,6 +3,7 @@
  */
 
 import axios from 'axios';
+import { DEMO_MODE } from '@/lib/demoMode';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -1334,6 +1335,9 @@ export const apiClient = {
     color: string;
     message?: string;
   }> {
+    if (DEMO_MODE) {
+      return { status: 'demo', age_hours: 0, color: 'green', message: 'Demo snapshot' };
+    }
     const response = await api.get('/api/weather/freshness');
     return response.data;
   },
