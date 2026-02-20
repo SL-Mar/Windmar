@@ -5,8 +5,8 @@ import { VoyageProvider } from '@/components/VoyageContext'
 import { DemoFooter } from '@/components/DemoFooter'
 
 export const metadata: Metadata = {
-  title: 'WINDMAR - Marine Route Analysis',
-  description: 'Marine route analysis for MR Product Tankers',
+  title: 'WINDMAR - Weather Routing & Performance Analytics',
+  description: 'Weather routing and performance analytics for MR Product Tankers',
 }
 
 export default function RootLayout({

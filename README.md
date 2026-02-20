@@ -1,8 +1,8 @@
-# WINDMAR - Maritime Route Optimization System
+# WINDMAR - Weather Routing & Performance Analytics
 
 > **Warning**: This project is under active development and is **not production-ready**. It is being built in public as a learning and portfolio project. APIs, data models, and features may change without notice. Do not use for actual voyage planning or navigation.
 
-A maritime route optimization platform for Medium Range (MR) Product Tankers. Minimizes fuel consumption through weather-aware A\* routing, physics-based vessel modeling, and real-time sensor fusion.
+A weather routing and performance analytics platform for Medium Range (MR) Product Tankers. Optimizes fuel consumption through weather-aware A\* routing, physics-based vessel modeling, engine log analytics, and real-time sensor fusion.
 
 **Documentation**: [windmar-nav.github.io](https://windmar-nav.github.io)
 

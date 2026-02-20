@@ -1,13 +1,15 @@
 """
-FastAPI Backend for WINDMAR Maritime Route Optimizer.
+FastAPI Backend for WINDMAR — Weather Routing & Performance Analytics.
 
 Provides REST API endpoints for:
 - Weather data visualization (wind/wave fields)
-- Route management (waypoints, RTZ import)
+- Route optimization (A*/VISIR weather routing)
 - Voyage calculation (per-leg SOG, ETA, fuel)
-- Vessel configuration
+- Vessel configuration and calibration
+- Engine log analytics
+- Regulatory compliance (CII, ECA, TSS)
 
-Version: 2.1.0
+Version: 0.0.9
 License: Apache 2.0 - See LICENSE file
 """
 
@@ -56,17 +58,18 @@ def create_app() -> FastAPI:
     application = FastAPI(
         title="WINDMAR API",
         description="""
-## Maritime Route Optimization API
+## Weather Routing & Performance Analytics API
 
-Professional-grade API for maritime route optimization, weather routing,
+Professional-grade API for weather routing, vessel performance analytics,
 and voyage planning.
 
 ### Features
-- Real-time weather data integration (Copernicus CDS/CMEMS)
-- A* pathfinding route optimization
+- Real-time weather data integration (GFS, Copernicus CMEMS)
+- A*/VISIR weather routing optimization
 - Vessel performance modeling with calibration
+- Engine log ingestion and analytics
 - Regulatory zone management (ECA, HRA, TSS)
-- Fuel consumption prediction
+- CII compliance calculations and projections
 
 ### Authentication
 API key authentication required for all endpoints except health checks.
