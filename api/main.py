@@ -32,6 +32,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile, File, Q
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from api.demo import require_not_demo, is_demo, demo_mode_response
 from fastapi.exceptions import RequestValidationError
 from slowapi.errors import RateLimitExceeded
 import uvicorn
@@ -1377,7 +1378,7 @@ _LAYER_INGEST_FN = {
 }
 
 
-@app.post("/api/weather/{layer}/resync")
+@app.post("/api/weather/{layer}/resync", dependencies=[Depends(require_not_demo("Weather resync"))])
 async def api_weather_layer_resync(
     layer: str,
     lat_min: Optional[float] = Query(None, ge=-90, le=90),
@@ -1925,7 +1926,7 @@ def _do_wind_prefetch(lat_min: float, lat_max: float, lon_min: float, lon_max: f
         pflock.release()
 
 
-@app.post("/api/weather/forecast/prefetch")
+@app.post("/api/weather/forecast/prefetch", dependencies=[Depends(require_not_demo("Weather prefetch"))])
 async def api_trigger_forecast_prefetch(
     background_tasks: BackgroundTasks,
     lat_min: float = Query(30.0),
@@ -2381,7 +2382,7 @@ def _do_wave_prefetch(lat_min: float, lat_max: float, lon_min: float, lon_max: f
         pflock.release()
 
 
-@app.post("/api/weather/forecast/wave/prefetch")
+@app.post("/api/weather/forecast/wave/prefetch", dependencies=[Depends(require_not_demo("Weather prefetch"))])
 async def api_trigger_wave_forecast_prefetch(
     background_tasks: BackgroundTasks,
     lat_min: float = Query(30.0),
@@ -2633,7 +2634,7 @@ def _do_current_prefetch(lat_min: float, lat_max: float, lon_min: float, lon_max
         pflock.release()
 
 
-@app.post("/api/weather/forecast/current/prefetch")
+@app.post("/api/weather/forecast/current/prefetch", dependencies=[Depends(require_not_demo("Weather prefetch"))])
 async def api_trigger_current_forecast_prefetch(
     background_tasks: BackgroundTasks,
     lat_min: float = Query(30.0),
@@ -2955,7 +2956,7 @@ def _do_ice_prefetch(lat_min: float, lat_max: float, lon_min: float, lon_max: fl
         pflock.release()
 
 
-@app.post("/api/weather/forecast/ice/prefetch")
+@app.post("/api/weather/forecast/ice/prefetch", dependencies=[Depends(require_not_demo("Weather prefetch"))])
 async def api_trigger_ice_forecast_prefetch(
     background_tasks: BackgroundTasks,
     lat_min: float = Query(30.0),
@@ -3214,7 +3215,7 @@ def _do_sst_prefetch(lat_min: float, lat_max: float, lon_min: float, lon_max: fl
         pflock.release()
 
 
-@app.post("/api/weather/forecast/sst/prefetch")
+@app.post("/api/weather/forecast/sst/prefetch", dependencies=[Depends(require_not_demo("Weather prefetch"))])
 async def api_trigger_sst_forecast_prefetch(
     background_tasks: BackgroundTasks,
     lat_min: float = Query(30.0),
@@ -3569,7 +3570,7 @@ def _do_vis_prefetch(lat_min: float, lat_max: float, lon_min: float, lon_max: fl
         pflock.release()
 
 
-@app.post("/api/weather/forecast/visibility/prefetch")
+@app.post("/api/weather/forecast/visibility/prefetch", dependencies=[Depends(require_not_demo("Weather prefetch"))])
 async def api_trigger_vis_forecast_prefetch(
     background_tasks: BackgroundTasks,
     lat_min: float = Query(30.0),
@@ -4996,7 +4997,7 @@ async def get_vessel_specs():
     }
 
 
-@app.post("/api/vessel/specs")
+@app.post("/api/vessel/specs", dependencies=[Depends(require_not_demo("Vessel configuration"))])
 @limiter.limit(get_rate_limit_string())
 async def update_vessel_specs(
     request: Request,
@@ -5085,7 +5086,7 @@ async def get_calibration():
     }
 
 
-@app.post("/api/vessel/calibration/set")
+@app.post("/api/vessel/calibration/set", dependencies=[Depends(require_not_demo("Vessel calibration"))])
 @limiter.limit(get_rate_limit_string())
 async def set_calibration_factors(
     request: Request,
@@ -5144,7 +5145,7 @@ async def get_noon_reports():
     }
 
 
-@app.post("/api/vessel/noon-reports")
+@app.post("/api/vessel/noon-reports", dependencies=[Depends(require_not_demo("Noon report upload"))])
 @limiter.limit(get_rate_limit_string())
 async def add_noon_report(
     request: Request,
@@ -5183,7 +5184,7 @@ async def add_noon_report(
     }
 
 
-@app.post("/api/vessel/noon-reports/upload-csv")
+@app.post("/api/vessel/noon-reports/upload-csv", dependencies=[Depends(require_not_demo("Noon report upload"))])
 @limiter.limit("10/minute")  # Lower rate limit for file uploads
 async def upload_noon_reports_csv(
     request: Request,
@@ -5247,7 +5248,7 @@ async def upload_noon_reports_csv(
         raise HTTPException(status_code=400, detail=f"Failed to parse CSV: {str(e)}")
 
 
-@app.post("/api/vessel/noon-reports/upload-excel")
+@app.post("/api/vessel/noon-reports/upload-excel", dependencies=[Depends(require_not_demo("Noon report upload"))])
 @limiter.limit("10/minute")
 async def upload_noon_reports_excel(
     request: Request,
@@ -5297,7 +5298,7 @@ async def upload_noon_reports_excel(
         raise HTTPException(status_code=400, detail=f"Failed to parse Excel: {str(e)}")
 
 
-@app.delete("/api/vessel/noon-reports")
+@app.delete("/api/vessel/noon-reports", dependencies=[Depends(require_not_demo("Noon report deletion"))])
 @limiter.limit(get_rate_limit_string())
 async def clear_noon_reports(
     request: Request,
@@ -5314,7 +5315,7 @@ async def clear_noon_reports(
     return {"status": "success", "message": "All noon reports cleared"}
 
 
-@app.post("/api/vessel/calibrate", response_model=CalibrationResponse)
+@app.post("/api/vessel/calibrate", response_model=CalibrationResponse, dependencies=[Depends(require_not_demo("Vessel calibration"))])
 @limiter.limit("5/minute")  # Lower limit for CPU-intensive operation
 async def calibrate_vessel(
     request: Request,
@@ -5388,7 +5389,7 @@ async def calibrate_vessel(
         raise HTTPException(status_code=500, detail=f"Calibration failed: {str(e)}")
 
 
-@app.post("/api/vessel/calibration/estimate-fouling")
+@app.post("/api/vessel/calibration/estimate-fouling", dependencies=[Depends(require_not_demo("Vessel calibration"))])
 async def estimate_hull_fouling(
     days_since_drydock: int = Query(..., ge=0),
     operating_regions: List[str] = Query(default=[], description="Operating regions: tropical, warm_temperate, cold, polar"),
@@ -5870,7 +5871,7 @@ async def get_zone(zone_id: str):
     return zone.to_geojson()
 
 
-@app.post("/api/zones", response_model=ZoneResponse)
+@app.post("/api/zones", response_model=ZoneResponse, dependencies=[Depends(require_not_demo("Zone creation"))])
 @limiter.limit(get_rate_limit_string())
 async def create_zone(
     http_request: Request,
@@ -5943,7 +5944,7 @@ async def create_zone(
     )
 
 
-@app.delete("/api/zones/{zone_id}")
+@app.delete("/api/zones/{zone_id}", dependencies=[Depends(require_not_demo("Zone deletion"))])
 @limiter.limit(get_rate_limit_string())
 async def delete_zone(
     request: Request,
@@ -6364,6 +6365,9 @@ async def calculate_cii_reduction(request: CIIReductionRequest):
 @app.get("/api/weather/freshness", tags=["Weather"])
 async def get_weather_freshness():
     """Get weather data freshness indicator (age of most recent data)."""
+    if is_demo():
+        return demo_mode_response("Weather freshness")
+
     if db_weather is None:
         return {
             "status": "unavailable",
@@ -6535,7 +6539,7 @@ class EngineLogSummaryResponse(BaseModel):
 MAX_EXCEL_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
-@app.post("/api/engine-log/upload", response_model=EngineLogUploadResponse, tags=["Engine Log"])
+@app.post("/api/engine-log/upload", response_model=EngineLogUploadResponse, tags=["Engine Log"], dependencies=[Depends(require_not_demo("Engine log upload"))])
 @limiter.limit("10/minute")
 async def upload_engine_log(
     request: Request,
@@ -6752,7 +6756,7 @@ async def get_engine_log_summary(
     )
 
 
-@app.delete("/api/engine-log/batch/{batch_id}", tags=["Engine Log"])
+@app.delete("/api/engine-log/batch/{batch_id}", tags=["Engine Log"], dependencies=[Depends(require_not_demo("Engine log deletion"))])
 @limiter.limit(get_rate_limit_string())
 async def delete_engine_log_batch(
     request: Request,
@@ -6792,7 +6796,7 @@ class EngineLogCalibrateResponse(BaseModel):
     improvement_pct: float
 
 
-@app.post("/api/engine-log/calibrate", response_model=EngineLogCalibrateResponse, tags=["Engine Log"])
+@app.post("/api/engine-log/calibrate", response_model=EngineLogCalibrateResponse, tags=["Engine Log"], dependencies=[Depends(require_not_demo("Engine log calibration"))])
 @limiter.limit("5/minute")
 async def calibrate_from_engine_log(
     request: Request,
