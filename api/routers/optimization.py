@@ -17,6 +17,7 @@ from api.schemas import (
     OptimizationLegModel,
     OptimizationRequest,
     OptimizationResponse,
+    ParetoSolutionModel,
     Position,
     SafetySummary,
     SpeedScenarioModel,
@@ -181,6 +182,20 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
                 weather_provider=wx_provider,
                 max_time_factor=request.max_time_factor,
             )
+        elif request.pareto:
+            result = active_optimizer.optimize_route_pareto(
+                origin=(request.origin.lat, request.origin.lon),
+                destination=(request.destination.lat, request.destination.lon),
+                departure_time=departure,
+                calm_speed_kts=request.calm_speed_kts,
+                is_laden=request.is_laden,
+                weather_provider=wx_provider,
+                max_time_factor=request.max_time_factor,
+                baseline_time_hours=request.baseline_time_hours,
+                baseline_fuel_mt=request.baseline_fuel_mt,
+                baseline_distance_nm=request.baseline_distance_nm,
+                route_waypoints=route_wps,
+            )
         else:
             result = active_optimizer.optimize_route(
                 origin=(request.origin.lat, request.origin.lon),
@@ -286,6 +301,21 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
                 time_savings_pct=round(sc.time_savings_pct, 1),
             ))
 
+        # Build Pareto front models (if available)
+        pareto_models = None
+        if result.pareto_front:
+            pareto_models = [
+                ParetoSolutionModel(
+                    lambda_value=round(p.lambda_value, 3),
+                    fuel_mt=round(p.fuel_mt, 2),
+                    time_hours=round(p.time_hours, 2),
+                    distance_nm=round(p.distance_nm, 1),
+                    speed_profile=[round(s, 1) for s in p.speed_profile],
+                    is_selected=p.is_selected,
+                )
+                for p in result.pareto_front
+            ]
+
         return OptimizationResponse(
             waypoints=waypoints,
             total_fuel_mt=round(result.total_fuel_mt, 2),
@@ -302,6 +332,7 @@ def _optimize_route_sync(request: "OptimizationRequest") -> "OptimizationRespons
             engine=engine_name,
             safety=safety_summary,
             scenarios=scenario_models,
+            pareto_front=pareto_models,
             baseline_fuel_mt=round(result.baseline_fuel_mt, 2) if result.baseline_fuel_mt else None,
             baseline_time_hours=round(result.baseline_time_hours, 2) if result.baseline_time_hours else None,
             baseline_distance_nm=round(result.baseline_distance_nm, 1) if result.baseline_distance_nm else None,

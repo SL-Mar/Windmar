@@ -32,6 +32,18 @@ logger = logging.getLogger(__name__)
 # -------------------------------------------------------------------
 
 @dataclass
+class ParetoSolution:
+    """One point on the Pareto front (fuel vs time trade-off)."""
+    lambda_value: float
+    fuel_mt: float
+    time_hours: float
+    distance_nm: float
+    waypoints: List[Tuple[float, float]]
+    speed_profile: List[float]
+    is_selected: bool = False
+
+
+@dataclass
 class OptimizedRoute:
     """Result of route optimization."""
     waypoints: List[Tuple[float, float]]  # (lat, lon) pairs
@@ -67,6 +79,9 @@ class OptimizedRoute:
 
     # Speed strategy scenarios (populated when baseline provided)
     scenarios: List = field(default_factory=list)
+
+    # Pareto front (populated when pareto=True)
+    pareto_front: List[ParetoSolution] = field(default_factory=list)
 
     # Baseline reference (from voyage calculation)
     baseline_fuel_mt: float = 0.0

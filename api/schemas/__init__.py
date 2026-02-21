@@ -42,6 +42,7 @@ from .optimization import (  # noqa: F401
     OptimizationLegModel,
     SafetySummary,
     SpeedScenarioModel,
+    ParetoSolutionModel,
     OptimizationResponse,
 )
 

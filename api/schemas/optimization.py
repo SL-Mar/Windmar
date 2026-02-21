@@ -35,6 +35,8 @@ class OptimizationRequest(BaseModel):
     baseline_distance_nm: Optional[float] = None
     # Safety weight: 0.0 = pure fuel optimization, 1.0 = full safety penalties
     safety_weight: float = Field(0.0, ge=0.0, le=1.0, description="Safety penalty weight: 0=fuel optimal, 1=safety priority")
+    # Pareto front: when True, run A* with multiple lambda values and return Pareto-optimal set
+    pareto: bool = Field(False, description="Return Pareto front of fuel/time trade-offs")
 
 
 class OptimizationLegModel(BaseModel):
@@ -89,6 +91,16 @@ class SpeedScenarioModel(BaseModel):
     time_savings_pct: float
 
 
+class ParetoSolutionModel(BaseModel):
+    """One point on the Pareto front."""
+    lambda_value: float
+    fuel_mt: float
+    time_hours: float
+    distance_nm: float
+    speed_profile: List[float]
+    is_selected: bool = False
+
+
 class OptimizationResponse(BaseModel):
     """Route optimization result."""
     waypoints: List[Position]
@@ -121,6 +133,9 @@ class OptimizationResponse(BaseModel):
     baseline_fuel_mt: Optional[float] = None
     baseline_time_hours: Optional[float] = None
     baseline_distance_nm: Optional[float] = None
+
+    # Pareto front (populated when pareto=True)
+    pareto_front: Optional[List[ParetoSolutionModel]] = None
 
     # Weather provenance
     weather_provenance: Optional[List[WeatherProvenanceModel]] = None
