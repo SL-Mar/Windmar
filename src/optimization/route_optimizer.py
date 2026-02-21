@@ -63,7 +63,9 @@ class GridCell:
         return hash((self.row, self.col))
 
     def __eq__(self, other):
-        return self.row == other.row and self.col == other.col
+        if isinstance(other, GridCell):
+            return self.row == other.row and self.col == other.col
+        return NotImplemented
 
 
 @dataclass(order=True)
@@ -691,7 +693,7 @@ class RouteOptimizer(BaseOptimizer):
             lat += self.resolution_deg
             row += 1
 
-        total_cells = row * col
+        total_cells = row * col if row > 0 and col > 0 else 1
         logger.info(f"Built grid: {len(grid)} ocean cells, {land_cells} land cells filtered "
                    f"({row} rows x {col} cols, {land_cells/total_cells*100:.1f}% land)")
 
@@ -774,6 +776,11 @@ class RouteOptimizer(BaseOptimizer):
                 self._strait_edges.add((k1, k2))
                 if strait.bidirectional:
                     self._strait_edges.add((k2, k1))
+
+        # Build adjacency map for O(1) neighbor lookup during A*
+        self._strait_neighbor_map: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+        for from_k, to_k in self._strait_edges:
+            self._strait_neighbor_map.setdefault(from_k, []).append(to_k)
 
         if injected > 0:
             logger.info(f"Injected {injected} strait waypoints ({len(self._strait_edges)} edges)")
@@ -882,10 +889,11 @@ class RouteOptimizer(BaseOptimizer):
                 for dr, dc in self.DIRECTIONS:
                     neighbor_keys.append((current.cell.row + dr, current.cell.col + dc))
 
-                # Add strait edge neighbors
-                if hasattr(self, '_strait_edges'):
-                    for from_k, to_k in self._strait_edges:
-                        if from_k == current_key and to_k not in [nk for nk in neighbor_keys]:
+                # Add strait edge neighbors (pre-indexed for O(1) lookup)
+                if hasattr(self, '_strait_neighbor_map') and current_key in self._strait_neighbor_map:
+                    neighbor_set = set(neighbor_keys)
+                    for to_k in self._strait_neighbor_map[current_key]:
+                        if to_k not in neighbor_set:
                             neighbor_keys.append(to_k)
 
             for neighbor_key in neighbor_keys:
@@ -1221,7 +1229,12 @@ class RouteOptimizer(BaseOptimizer):
         # Fallback if no valid speed found (all skipped by safety or SOG)
         if not results or best_time == float('inf'):
             fallback_sog = max(min_speed + current_effect, 0.5)
-            return min_speed, 0.0, distance_nm / fallback_sog
+            # Estimate fuel at min speed (calm conditions) rather than returning 0.0
+            fallback_result = self.vessel_model.calculate_fuel_consumption(
+                speed_kts=min_speed, is_laden=is_laden,
+                weather=weather_dict, distance_nm=distance_nm,
+            )
+            return min_speed, fallback_result['fuel_mt'], distance_nm / fallback_sog
 
         # If we have a target time constraint, adjust speed
         if target_time_hours is not None and best_time > target_time_hours:

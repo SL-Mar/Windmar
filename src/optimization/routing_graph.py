@@ -213,8 +213,9 @@ class RoutingGraph:
         nearshore_keys: set,
     ):
         """Connect fine nodes at tier boundaries to adjacent coarse nodes."""
-        # For each fine node, check if any of its 16-direction neighbors
-        # would fall outside the fine grid → connect to nearest coarse node
+        # For each fine node, check if any of its cardinal+diagonal neighbors
+        # would fall outside the fine grid → connect to nearest coarse node.
+        # We check ALL 8 directions to ensure full connectivity at boundaries.
         for (frow, fcol), fine_id in self._fine_grid.items():
             fine_node = self._nodes[fine_id]
             for dr, dc in self.DIRECTIONS[:8]:  # Only cardinal+diagonal for cross-tier
@@ -236,7 +237,6 @@ class RoutingGraph:
                                     coarse_node = self._nodes[coarse_id]
                                     if fine_id not in coarse_node.neighbors:
                                         coarse_node.neighbors.append(fine_id)
-                    break  # Only need one cross-tier check per fine node
 
     def _build_strtree(self):
         """Build spatial index for get_nearest_node()."""
