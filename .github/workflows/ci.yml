@@ -142,30 +142,56 @@ jobs:
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest
+    needs: [docker-build]
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run Trivy vulnerability scanner
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Run Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
           scan-ref: '.'
           format: 'sarif'
-          output: 'trivy-results.sarif'
+          output: 'trivy-fs-results.sarif'
+          severity: 'HIGH,CRITICAL'
 
-      - name: Upload Trivy results to GitHub Security
+      - name: Upload Trivy FS results to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
+        if: always()
         with:
-          sarif_file: 'trivy-results.sarif'
+          sarif_file: 'trivy-fs-results.sarif'
 
-      - name: Python dependency check
-        uses: pyupio/safety@2.3.5
+      - name: Run Trivy on backend Docker image
+        uses: aquasecurity/trivy-action@master
         with:
-          api-key: ${{ secrets.SAFETY_API_KEY }}
-          args: --json
+          scan-type: 'image'
+          image-ref: 'windmar-api:test'
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL'
         continue-on-error: true
+
+      - name: Run Trivy on frontend Docker image
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'image'
+          image-ref: 'windmar-frontend:test'
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL'
+        continue-on-error: true
+
+      - name: Run pip-audit for Python SCA
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt --desc --fix --dry-run || true
 
   # Docker build test
   docker-build:
@@ -218,6 +244,7 @@ jobs:
           API_SECRET_KEY=test_secret_key_for_ci
           AUTH_ENABLED=false
           RATE_LIMIT_ENABLED=false
+          DEMO_MODE=false
           ENVIRONMENT=development
           EOF
 

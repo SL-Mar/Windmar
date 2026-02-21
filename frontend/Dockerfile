@@ -6,9 +6,9 @@ FROM base AS deps
 RUN apk add --no-cache libc6-compat
 WORKDIR /app
 
-# Copy package files (delete stale lock file to regenerate)
-COPY package.json ./
-RUN npm install --legacy-peer-deps
+# Copy package files for deterministic install
+COPY package.json package-lock.json ./
+RUN npm ci --legacy-peer-deps
 
 # Rebuild the source code only when needed
 FROM base AS builder

@@ -1,12 +1,19 @@
 #!/bin/bash
 
-# WINDMAR Startup Script
-# Starts both backend API and frontend web application
+# =============================================================================
+# WINDMAR Startup Script — LOCAL DEVELOPMENT ONLY
+# =============================================================================
+# WARNING: This script installs dependencies at runtime via pip/npm.
+#          DO NOT use in production. For production, use the multi-stage
+#          Dockerfiles (Dockerfile, frontend/Dockerfile) which bundle all
+#          dependencies at build time with no runtime installs.
+# =============================================================================
 
 set -e
 
 echo "======================================================================"
 echo "  WINDMAR - Maritime Route Optimizer"
+echo "  [LOCAL DEV] Not for production — use Docker for deployments"
 echo "======================================================================"
 echo ""
 

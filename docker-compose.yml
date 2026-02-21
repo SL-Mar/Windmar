@@ -7,13 +7,12 @@ services:
     container_name: windmar-db
     environment:
       POSTGRES_USER: ${DB_USER:-windmar}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-windmar_dev_password}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD env var required}
       POSTGRES_DB: ${DB_NAME:-windmar}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init.sql
-    ports:
-      - "${DB_PORT:-5432}:5432"
+    # No external port — access via windmar-network only
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-windmar}"]
       interval: 10s
@@ -27,11 +26,10 @@ services:
   redis:
     image: redis:7-alpine
     container_name: windmar-redis
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-windmar_redis_password}
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD env var required}
     volumes:
       - redis_data:/data
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
+    # No external port — access via windmar-network only
     healthcheck:
       test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
       interval: 10s
@@ -49,21 +47,21 @@ services:
     container_name: windmar-api
     environment:
       # Database
-      DATABASE_URL: postgresql://${DB_USER:-windmar}:${DB_PASSWORD:-windmar_dev_password}@db:5432/${DB_NAME:-windmar}
+      DATABASE_URL: postgresql://${DB_USER:-windmar}:${DB_PASSWORD:?DB_PASSWORD env var required}@db:5432/${DB_NAME:-windmar}
       # Redis
-      REDIS_URL: redis://:${REDIS_PASSWORD:-windmar_redis_password}@redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD env var required}@redis:6379/0
       # API Configuration
-      API_SECRET_KEY: ${API_SECRET_KEY:-change_this_in_production}
+      API_SECRET_KEY: ${API_SECRET_KEY:?API_SECRET_KEY env var required}
       API_KEY_HEADER: ${API_KEY_HEADER:-X-API-Key}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:3001}
       # Authentication
-      AUTH_ENABLED: ${AUTH_ENABLED:-false}
+      AUTH_ENABLED: ${AUTH_ENABLED:-true}
       # Application
       LOG_LEVEL: ${LOG_LEVEL:-info}
       ENVIRONMENT: ${ENVIRONMENT:-development}
-      DEMO_MODE: ${DEMO_MODE:-false}
+      DEMO_MODE: ${DEMO_MODE:?DEMO_MODE env var required (true/false)}
       # Copernicus Weather Data
-      COPERNICUS_MOCK_MODE: ${COPERNICUS_MOCK_MODE:-true}
+      COPERNICUS_MOCK_MODE: ${COPERNICUS_MOCK_MODE:-false}
       CDSAPI_URL: ${CDSAPI_URL:-https://cds.climate.copernicus.eu/api}
       CDSAPI_KEY: ${CDSAPI_KEY:-}
       COPERNICUSMARINE_SERVICE_USERNAME: ${COPERNICUSMARINE_SERVICE_USERNAME:-}

@@ -14,7 +14,7 @@ set -euo pipefail
 
 # Configuration (override via environment)
 DB_USER="${DB_USER:-windmar}"
-DB_PASSWORD="${DB_PASSWORD:-windmar_dev_password}"
+DB_PASSWORD="${DB_PASSWORD:?DB_PASSWORD env var required}"
 DB_NAME="${DB_NAME:-windmar}"
 DB_CONTAINER="${DB_CONTAINER:-windmar-db}"
 BACKUP_DIR="${BACKUP_DIR:-$(dirname "$0")/backups}"

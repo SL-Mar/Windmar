@@ -10,7 +10,7 @@ services:
     container_name: windmar-db
     environment:
       POSTGRES_USER: windmar
-      POSTGRES_PASSWORD: windmar_demo
+      POSTGRES_PASSWORD: ${DEMO_DB_PASSWORD:?DEMO_DB_PASSWORD env var required}
       POSTGRES_DB: windmar
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -33,13 +33,13 @@ services:
     image: ghcr.io/windmar-nav/windmar-api:demo
     container_name: windmar-api
     environment:
-      DATABASE_URL: postgresql://windmar:windmar_demo@db:5432/windmar
+      DATABASE_URL: postgresql://windmar:${DEMO_DB_PASSWORD:?DEMO_DB_PASSWORD env var required}@db:5432/windmar
       REDIS_ENABLED: "false"
       REDIS_URL: ""
       DEMO_MODE: "true"
       DEMO_API_KEY_HASH: ${DEMO_API_KEY_HASH}
       AUTH_ENABLED: "false"
-      RATE_LIMIT_ENABLED: "false"
+      RATE_LIMIT_ENABLED: "true"
       API_SECRET_KEY: ${API_SECRET_KEY:-change_me}
       CORS_ORIGINS: "https://demo-windmar.slmar.co,http://localhost:3000"
       LOG_LEVEL: "info"
