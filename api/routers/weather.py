@@ -19,7 +19,7 @@ import numpy as np
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from starlette.responses import Response
 
-from api.demo import require_not_demo, is_demo, demo_mode_response
+from api.demo import require_not_demo, is_demo, demo_mode_response, limit_demo_frames
 from api.state import get_app_state
 from api.weather_service import (
     get_wind_field, get_wave_field, get_current_field,
@@ -1408,12 +1408,18 @@ async def api_get_forecast_frames(
 
     The cache is built once during prefetch. No GRIB parsing happens here.
     Serves the raw JSON file to avoid parse+re-serialize overhead.
+    In demo mode, frames are filtered to every Nth hour.
     """
     gfs_provider = _get_providers()['gfs']
 
     cache_key = wind_layer.make_cache_key(lat_min, lat_max, lon_min, lon_max)
     cache_file = wind_layer.cache_path(cache_key)
+
     if cache_file.exists():
+        if is_demo():
+            cached = wind_layer.cache_get(cache_key)
+            if cached:
+                return limit_demo_frames(cached)
         return Response(content=cache_file.read_bytes(), media_type="application/json")
 
     # No file cache -- fallback: rebuild from PostgreSQL
@@ -1422,6 +1428,8 @@ async def api_get_forecast_frames(
     )
 
     if cached:
+        if is_demo():
+            return limit_demo_frames(cached)
         return cached
 
     # No DB data either -- return empty
@@ -1520,11 +1528,18 @@ async def api_get_wave_forecast_frames(
     """Return all cached CMEMS wave forecast frames.
 
     Serves the raw JSON file to avoid parse+re-serialize overhead.
+    In demo mode, frames are filtered to every Nth hour.
     """
     cache_key = wave_layer.make_cache_key(lat_min, lat_max, lon_min, lon_max)
-    raw = wave_layer.serve_frames_file(cache_key)
-    if raw is not None:
-        return raw
+
+    if is_demo():
+        cached = wave_layer.cache_get(cache_key)
+        if cached:
+            return limit_demo_frames(cached)
+    else:
+        raw = wave_layer.serve_frames_file(cache_key)
+        if raw is not None:
+            return raw
 
     # Fallback: rebuild from PostgreSQL
     cached = await asyncio.to_thread(
@@ -1545,6 +1560,8 @@ async def api_get_wave_forecast_frames(
             "frames": {},
         }
 
+    if is_demo():
+        return limit_demo_frames(cached)
     return cached
 
 
@@ -1621,11 +1638,18 @@ async def api_get_current_forecast_frames(
     """Return all cached CMEMS current forecast frames.
 
     Serves the raw JSON file to avoid parse+re-serialize overhead.
+    In demo mode, frames are filtered to every Nth hour.
     """
     cache_key = current_layer.make_cache_key(lat_min, lat_max, lon_min, lon_max)
-    raw = current_layer.serve_frames_file(cache_key)
-    if raw is not None:
-        return raw
+
+    if is_demo():
+        cached = current_layer.cache_get(cache_key)
+        if cached:
+            return limit_demo_frames(cached)
+    else:
+        raw = current_layer.serve_frames_file(cache_key)
+        if raw is not None:
+            return raw
 
     # Fallback: rebuild from PostgreSQL
     cached = await asyncio.to_thread(
@@ -1645,6 +1669,8 @@ async def api_get_current_forecast_frames(
             "frames": {},
         }
 
+    if is_demo():
+        return limit_demo_frames(cached)
     return cached
 
 
@@ -1722,11 +1748,18 @@ async def api_get_ice_forecast_frames(
     """Return all cached CMEMS ice forecast frames.
 
     Serves the raw JSON file to avoid parse+re-serialize overhead.
+    In demo mode, frames are filtered to every Nth hour.
     """
     cache_key = ice_layer.make_cache_key(lat_min, lat_max, lon_min, lon_max)
-    raw = ice_layer.serve_frames_file(cache_key)
-    if raw is not None:
-        return raw
+
+    if is_demo():
+        cached = ice_layer.cache_get(cache_key)
+        if cached:
+            return limit_demo_frames(cached)
+    else:
+        raw = ice_layer.serve_frames_file(cache_key)
+        if raw is not None:
+            return raw
 
     # Fallback: rebuild from PostgreSQL
     cached = await asyncio.to_thread(
@@ -1746,6 +1779,8 @@ async def api_get_ice_forecast_frames(
             "frames": {},
         }
 
+    if is_demo():
+        return limit_demo_frames(cached)
     return cached
 
 
@@ -1808,11 +1843,18 @@ async def api_get_sst_forecast_frames(
     Serves the raw JSON file to avoid parse+re-serialize overhead.
     Falls back to any cache file whose bounds cover the requested viewport,
     then to PostgreSQL if no file cache exists.
+    In demo mode, frames are filtered to every Nth hour.
     """
     cache_key = sst_layer.make_cache_key(lat_min, lat_max, lon_min, lon_max)
-    raw = sst_layer.serve_frames_file(cache_key, lat_min, lat_max, lon_min, lon_max, use_covering=True)
-    if raw is not None:
-        return raw
+
+    if is_demo():
+        cached = sst_layer.cache_get(cache_key)
+        if cached:
+            return limit_demo_frames(cached)
+    else:
+        raw = sst_layer.serve_frames_file(cache_key, lat_min, lat_max, lon_min, lon_max, use_covering=True)
+        if raw is not None:
+            return raw
 
     # Fallback: rebuild from PostgreSQL
     cached = await asyncio.to_thread(
@@ -1820,6 +1862,8 @@ async def api_get_sst_forecast_frames(
     )
 
     if cached:
+        if is_demo():
+            return limit_demo_frames(cached)
         return cached
 
     return {
@@ -1893,11 +1937,18 @@ async def api_get_vis_forecast_frames(
 
     Serves the raw JSON file to avoid parse+re-serialize overhead.
     Falls back to any cache file whose bounds cover the requested viewport.
+    In demo mode, frames are filtered to every Nth hour.
     """
     cache_key = vis_layer.make_cache_key(lat_min, lat_max, lon_min, lon_max)
-    raw = vis_layer.serve_frames_file(cache_key, lat_min, lat_max, lon_min, lon_max, use_covering=True)
-    if raw is not None:
-        return raw
+
+    if is_demo():
+        cached = vis_layer.cache_get(cache_key)
+        if cached:
+            return limit_demo_frames(cached)
+    else:
+        raw = vis_layer.serve_frames_file(cache_key, lat_min, lat_max, lon_min, lon_max, use_covering=True)
+        if raw is not None:
+            return raw
 
     # Fallback: rebuild from PostgreSQL
     cached = await asyncio.to_thread(
@@ -1905,6 +1956,8 @@ async def api_get_vis_forecast_frames(
     )
 
     if cached:
+        if is_demo():
+            return limit_demo_frames(cached)
         return cached
 
     return {

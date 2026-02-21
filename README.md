@@ -568,8 +568,7 @@ Live connectivity to Copernicus and NOAA weather services.
 
 ## Branch Strategy
 
-- `main` - Stable release branch
-- `demo` - Demo deployment branch (isolated)
+- `main` - Stable release branch (also triggers demo deployment)
 
 ## Documentation
 

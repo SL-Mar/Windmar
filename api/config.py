@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     db_echo: bool = False
     demo_mode: bool = False
     demo_api_key_hash: Optional[str] = None
+    demo_forecast_step: int = 12
 
     # ========================================================================
     # Redis Configuration

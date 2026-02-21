@@ -33,3 +33,25 @@ def demo_mode_response(feature_name: str = "This feature"):
 def is_demo() -> bool:
     """Check if demo mode is active."""
     return settings.demo_mode
+
+
+def limit_demo_frames(result: dict) -> dict:
+    """Filter forecast frames to keep only every Nth hour in demo mode.
+
+    Reduces 41 frames (0-120h @ 3h) to ~11 frames (0, 12, 24, ..., 120)
+    based on ``settings.demo_forecast_step``.  Passes through non-dict
+    results and results without a ``frames`` key unchanged.
+    """
+    if not isinstance(result, dict) or "frames" not in result:
+        return result
+
+    step = settings.demo_forecast_step
+    frames = result["frames"]
+    filtered = {
+        k: v for k, v in frames.items()
+        if int(k) % step == 0
+    }
+    result["frames"] = filtered
+    if "cached_hours" in result:
+        result["cached_hours"] = len(filtered)
+    return result
